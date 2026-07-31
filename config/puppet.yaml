@@ -1,0 +1,297 @@
+# MAKI puppet-mode runtime configuration (MPP/1 stack).
+#
+# Real hardware values ported from the vendored ROS bundle:
+#   servo.joints        <- maki-rpi5-v0.2.13-rc.4/src/maki_servos/maki_servos/servo_node.py
+#                          (JOINT_LIMITS_TICKS, DEFAULT_HARDWARE_SIGN, ID_TO_JOINT_NAME)
+#                          + src/maki_servos/config/maki_servos_defaults.yaml
+#                          (profile velocity, position PID, bulk-read resiliency)
+#   motion.profiles     <- src/maki_motion/config/maki_motion.yaml (shipped values,
+#   motion.idle_breathing  which override the code defaults in motion_planner_node.py)
+#   motion.layers       <- pinned MPP/1 contract priorities/timeouts; blend times
+#                          from maki_motion.yaml
+
+server:
+  host: 0.0.0.0
+  port: 8765
+
+# When true, the app wires SimServoBus/SimLedRing instead of real hardware
+# (also forced by the --sim CLI flag).
+sim: false
+
+servo:
+  port: /dev/ttyUSB0
+  baud: 1000000
+  protocol_version: 2.0
+  # Same lock file the ROS servo_node uses -> fail-fast mutual exclusion.
+  lock_file: /tmp/maki_servo_ttyUSB0.lock
+  # Bulk-read resiliency (exponential-backoff port reopen)
+  read_retry_backoff_initial_ms: 20.0
+  read_retry_backoff_max_ms: 200.0
+  max_consecutive_failures_before_reopen: 5
+  joints:
+    # sign: hardware direction (body-centric +rad convention).
+    # ticks: allowed [min, max] range — enforced in ServoBus's single choke
+    #   point before SyncWrite (limits are NOT in servo EEPROM).
+    # neutral_tick: the "home" tick commanded at rad 0 (the vendored stack's
+    #   clamp(2048, min, max) policy — 2048 is inside every range below).
+    # profile_velocity: ticks/s hardware trap-profile cap (0 = unlimited).
+    # pid: position PID gains written at init (0 = leave factory default;
+    #   XL430 factory P=640 I=0 D=3600, XL330 factory P=400 I=0 D=0).
+    head_pan:
+      id: 1
+      model: XL430
+      sign: -1
+      ticks: [1348, 2748]
+      neutral_tick: 2048
+      profile_velocity: 130      # XL430 under heavy head load — raised for tracking
+      pid: {p: 300, i: 0, d: 4000}
+    head_tilt:
+      id: 2
+      model: XL430
+      sign: 1
+      # Down end restored to the vendored design limit (2300) so the sleep pose
+      # can droop fully; the up end stays tightened at 1800.
+      # Reference: maki_vision/face_tracker_node.py:488-490 documents the safe
+      # range as 1750–2300 (positive rad = DOWN, per eye_gaze_node.py:110).
+      ticks: [1800, 2300]
+      neutral_tick: 2048
+      profile_velocity: 110      # XL430 with head mass — raised for tracking
+      pid: {p: 600, i: 0, d: 4200}
+    eyes_tilt:
+      id: 3
+      model: XL430
+      sign: 1
+      ticks: [1600, 2200]
+      neutral_tick: 2048
+      profile_velocity: 0        # eyes should remain fast/unlimited
+      pid: {p: 0, i: 0, d: 0}
+    eyes_pan:
+      id: 4
+      model: XL430
+      sign: 1
+      ticks: [1846, 2250]
+      neutral_tick: 2048
+      profile_velocity: 0
+      pid: {p: 0, i: 0, d: 0}
+    left_eyelid:
+      id: 5
+      model: XL430
+      sign: 1
+      ticks: [1448, 2096]
+      neutral_tick: 2048
+      profile_velocity: 0
+      pid: {p: 0, i: 0, d: 0}
+    right_eyelid:
+      # Eyelid servos face each other — mirror the right eyelid so blinks sync.
+      id: 6
+      model: XL430
+      sign: -1
+      ticks: [2000, 2600]
+      neutral_tick: 2048
+      profile_velocity: 0
+      pid: {p: 0, i: 0, d: 0}
+    mouth:
+      id: 7
+      model: XL330
+      sign: 1
+      ticks: [1960, 2500]
+      neutral_tick: 2048
+      profile_velocity: 0
+      pid: {p: 0, i: 0, d: 0}
+
+led:
+  pixel_count: 48
+  lock_file: /tmp/maki_led_spi.lock
+  animations_file: animations.yaml   # relative to this config dir
+  default_animation: steady_blue
+
+motion:
+  rate_hz: 50
+  # EMA alpha for smoothing normalized servo-load readings before the
+  # load-reactive dampening ramp (avoid spiky velocity scaling).
+  load_ema_alpha: 0.40
+
+  # Layer priorities/claim timeouts per the pinned MPP/1 contract
+  # (safety=100 beats any wire priority, which caps at 79).
+  # Blend times from the vendored maki_motion.yaml.
+  layers:
+    idle:       {priority: 30,  blend_in_time_s: 0.5,  blend_out_time_s: 0.8, claim_timeout_s: 5.0}
+    expression: {priority: 40,  blend_in_time_s: 0.2,  blend_out_time_s: 0.3, claim_timeout_s: 1.5, merge_targets: true}
+    tracking:   {priority: 50,  blend_in_time_s: 0.3,  blend_out_time_s: 0.5, claim_timeout_s: 1.0}
+    gesture:    {priority: 55,  blend_in_time_s: 0.25, blend_out_time_s: 0.5, claim_timeout_s: 1.0}
+    safety:     {priority: 100, blend_in_time_s: 0.0,  blend_out_time_s: 0.0, claim_timeout_s: 5.0}
+
+  # Per-servo S-curve profiles (real shipped values from maki_motion.yaml).
+  # Units: degrees/s, degrees/s^2, degrees/s^3, radians.
+  #   short_move_radius/min_scale — distance-adaptive velocity scaling.
+  #   load_dampening_threshold — normalized load (0-1) above which
+  #     velocity/accel caps start reducing; floor = minimum scale at max load.
+  #   settling_radius/stiffness — exponential-decay arrival zone.
+  profiles:
+    head_pan:
+      planning_enabled: true         # S-curve active
+      max_velocity_dps: 140.0        # slightly higher headroom for tracking
+      max_acceleration_dps2: 260.0   # faster ramp-up for responsive tracking
+      max_jerk_dps3: 500.0           # soft accel transitions
+      deadband_rad: 0.025            # ~1.4 deg — filters target jitter
+      target_smoothing_alpha: 0.25   # EMA on incoming targets — tested smooth
+      settling_radius: 0.04          # ~2.3 deg — exponential decay approach
+      settling_stiffness: 25.0
+      short_move_radius: 0.15        # ~8.6 deg — distance-adaptive scaling
+      short_move_min_scale: 0.15
+      load_dampening_threshold: 0.15 # start dampening at 15% load
+      load_dampening_floor: 0.12     # reduce to 12% speed at max load
+    head_tilt:
+      planning_enabled: true
+      max_velocity_dps: 118.0
+      max_acceleration_dps2: 230.0
+      max_jerk_dps3: 400.0
+      deadband_rad: 0.025
+      target_smoothing_alpha: 0.25
+      settling_radius: 0.04
+      settling_stiffness: 25.0
+      short_move_radius: 0.15
+      short_move_min_scale: 0.15
+      load_dampening_threshold: 0.12 # tilt loads heavily — dampen very early
+      load_dampening_floor: 0.12     # aggressive dampening
+    eyes_pan:
+      planning_enabled: true         # smooths step-limited gaze targets
+      max_velocity_dps: 400.0
+      max_acceleration_dps2: 1600.0
+      max_jerk_dps3: 8000.0
+      deadband_rad: 0.008            # ~0.5 deg
+      target_smoothing_alpha: 0.0    # no EMA — S-curve alone smooths
+      settling_radius: 0.02          # small (eye steps are tiny)
+      settling_stiffness: 25.0
+      short_move_radius: 0.0         # eyes: no distance scaling (fast)
+      short_move_min_scale: 0.15
+      load_dampening_threshold: 1.0  # eyes: no load dampening
+      load_dampening_floor: 0.20
+    eyes_tilt:
+      planning_enabled: true
+      max_velocity_dps: 400.0
+      max_acceleration_dps2: 1600.0
+      max_jerk_dps3: 8000.0
+      deadband_rad: 0.008
+      target_smoothing_alpha: 0.0
+      settling_radius: 0.02
+      settling_stiffness: 25.0
+      short_move_radius: 0.0
+      short_move_min_scale: 0.15
+      load_dampening_threshold: 1.0
+      load_dampening_floor: 0.20
+    # ── TUNING BLINKS ──────────────────────────────────────────────────
+    # Blink DEPTH and blink SPEED are controlled by different knobs, and the
+    # non-obvious part is that depth is set here, not by the blink duration.
+    #
+    # A blink closes the full 52.7 deg lid stroke inside the close phase
+    # (45% of idle.blink_duration_ms — so ~50 ms at 110 ms). Whether the lid
+    # actually gets there is bound by ACCELERATION, not top speed: a
+    # triangular move covers a*t^2/4, so it needs a >= 4*stroke/t^2
+    # (~84000 dps^2 here). At the original 8000 dps^2 the lid needed 188 ms
+    # just to reach top speed, covered only ~9 of the 52.7 deg, and read as a
+    # shallow twitch. 90000 leaves margin to close fully.
+    #
+    # Consequences when retuning:
+    #   * Want SOFTER / gentler blinks -> lower max_velocity_dps first
+    #     (2500 -> ~1200). This slows the lid without capping its travel, so
+    #     the blink stays fully closed but looks less snappy. Lower
+    #     max_jerk_dps3 too (1000000 -> ~300000) to round off the start/stop.
+    #   * Do NOT soften by lowering max_acceleration_dps2 — below ~84000 the
+    #     lid stops reaching full closure and blinks get shallow again, which
+    #     reads as a broken twitch rather than a gentle blink.
+    #   * Want SLOWER blinks -> raise idle.blink_duration_ms. That lengthens
+    #     the close phase, which *reduces* the acceleration needed, so depth
+    #     is safe. Shortening it below ~110 ms needs a matching accel bump.
+    #   * Want LESS FREQUENT blinks -> idle.blink_interval_s (not here).
+    #   * left_eyelid and right_eyelid must keep IDENTICAL profile values, or
+    #     the mirrored lids desynchronize mid-blink.
+    left_eyelid:
+      planning_enabled: true         # smooths eyelid stair-steps without slowing blinks
+      max_velocity_dps: 2500.0       # lower this for softer blinks
+      max_acceleration_dps2: 90000.0
+      max_jerk_dps3: 1000000.0
+      deadband_rad: 0.005
+      target_smoothing_alpha: 0.0
+      settling_radius: 0.0           # no settling (instant blink stop)
+      settling_stiffness: 25.0
+      short_move_radius: 0.0
+      short_move_min_scale: 0.15
+      load_dampening_threshold: 1.0
+      load_dampening_floor: 0.20
+    right_eyelid:
+      planning_enabled: true         # keep mirrored eyelids on the same smooth path
+      # Must match left_eyelid exactly or the lids desynchronize mid-blink.
+      max_velocity_dps: 2500.0
+      max_acceleration_dps2: 90000.0
+      max_jerk_dps3: 1000000.0
+      deadband_rad: 0.005
+      target_smoothing_alpha: 0.0
+      settling_radius: 0.0
+      settling_stiffness: 25.0
+      short_move_radius: 0.0
+      short_move_min_scale: 0.15
+      load_dampening_threshold: 1.0
+      load_dampening_floor: 0.20
+    mouth:
+      planning_enabled: false        # passthrough
+      max_velocity_dps: 200.0
+      max_acceleration_dps2: 800.0
+      max_jerk_dps3: 4000.0
+      deadband_rad: 0.010
+      target_smoothing_alpha: 0.0
+      settling_radius: 0.0
+      settling_stiffness: 25.0
+      short_move_radius: 0.0
+      short_move_min_scale: 0.15
+      load_dampening_threshold: 1.0
+      load_dampening_floor: 0.20
+
+  # Idle micro-breathing — subtle sinusoidal head sway applied as a
+  # deadband-exempt additive offset after the S-curve step, only on joints a
+  # layer currently claims and only when the planner has settled.
+  idle_breathing:
+    enabled: true
+    amplitude_deg: 0.3       # default peak offset (~0.005 rad)
+    frequency_hz: 0.2        # one breath cycle every 5 s
+    phase_offset_s: 0.0
+    joints: [head_tilt, head_pan]
+    per_joint:
+      head_pan:
+        amplitude_deg: 0.15  # subtler sway (~0.003 rad)
+        frequency_hz: 0.08   # slower than breathing (~12.5 s cycle)
+
+idle:
+  delay_s: 5.0
+  led_animation: steady_blue
+  # Gap between idle blinks, sampled uniformly at random from this range.
+  blink_interval_s: [8.0, 16.0]
+  # Blink speed. Raising this gives slower, gentler blinks and is always
+  # safe; going much below 110 ms needs more eyelid acceleration or the
+  # blink stops closing fully. For softer blinks at the same timing, lower
+  # max_velocity_dps on the eyelids — see 'TUNING BLINKS' in motion.profiles.
+  blink_duration_ms: 110
+
+# Waking-up / going-to-sleep sequences run at gateway start and stop.
+# head_tilt/eyelids are normalized wire units (see PROTOCOL.md §3).
+# NOTE on head_tilt sign: positive is head-DOWN on this hardware (matches the
+# vendored `nod`/`lean_forward` gestures and the `sleepy` keyframes).
+boot:
+  startup:
+    # chase_rainbow spins the pattern around the ring; rainbow_swirl cycles the
+    # whole ring through one hue at a time, which reads as a pulse, not a spin.
+    led_animation: chase_rainbow      # rotating rainbow while it wakes
+    head_tilt: 0.0                    # head level
+    eyelids: 1.0                      # eyes open
+    # Exactly one rainbow revolution: matches chase_rainbow's `period` in
+    # animations.yaml. Raising this spins it more than once.
+    duration_s: 1.5
+  shutdown:
+    led_animation: sleep_deep_breathe # slow blue-purple sleep glow
+    head_tilt: 1.0                    # head all the way down (end of safe range)
+    eyelids: 0.0                      # eyes closed
+    duration_s: 2.5
+    # Hard cap: a wedged servo bus must never hang shutdown.
+    timeout_s: 5.0
+
+choreographies_file: choreographies.yaml

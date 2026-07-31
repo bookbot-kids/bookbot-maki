@@ -1,0 +1,11 @@
+{
+  "type": "ack",
+  "id": "s-19",
+  "ts": 1751421002900,
+  "payload": {
+    "ref": "c-9",
+    "status": "completed",
+    "choreography": "word_read",
+    "duration_ms": 850
+  }
+}

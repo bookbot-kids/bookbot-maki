@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maki-puppet"
+version = "0.1.0"
+description = "ROS-free puppet-mode control system for the MAKI robot: WebSocket event gateway, action engine, and direct hardware drivers"
+requires-python = ">=3.10"
+dependencies = [
+    # server.py uses the modern asyncio API (websockets.asyncio.server), added in 13.
+    "websockets>=13",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+# Robot-only hardware drivers (Raspberry Pi). Dev machines run --sim without these.
+robot = [
+    "dynamixel-sdk>=3.7",
+    "adafruit-circuitpython-neopixel-spi",
+    "adafruit-blinka",
+]
+dev = [
+    "pytest>=7",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+maki-puppet = "maki_puppet.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["maki_puppet*", "maki_client*"]
+where = [".", "clients/python"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

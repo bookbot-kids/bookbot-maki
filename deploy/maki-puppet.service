@@ -1,0 +1,35 @@
+# maki-puppet.service — systemd *user* unit for the MAKI puppet gateway.
+#
+# IMPORTANT: install this only AFTER bench verification — deploy, run
+# manually via scripts/run_puppet.sh, and pass scripts/smoke.py first.
+# Once enabled, it claims the servo/LED lock files at login, which blocks
+# both manual bench runs and the ROS 2 stack until it is stopped.
+#
+# Install (as the lux user, no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   cp ~/maki_puppet/deploy/maki-puppet.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now maki-puppet
+#   loginctl enable-linger "$USER"     # keep it running with no SSH session
+#
+# Operate:
+#   journalctl --user -u maki-puppet -f     # logs
+#   systemctl --user stop maki-puppet       # stop (torque-off + lock release)
+#   systemctl --user disable --now maki-puppet
+
+[Unit]
+Description=MAKI puppet-mode control gateway (ROS-free, MPP/1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/maki_puppet/scripts/run_puppet.sh
+Restart=on-failure
+RestartSec=2
+# SIGTERM triggers ServoBus torque-off + lock release; give it time to finish.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,9 @@
+{
+  "type": "estop",
+  "id": "c-13",
+  "ts": 1751421005000,
+  "payload": {
+    "engage": true,
+    "reason": "child pressed stop"
+  }
+}

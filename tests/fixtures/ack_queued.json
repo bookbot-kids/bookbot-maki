@@ -1,0 +1,14 @@
+{
+  "type": "ack",
+  "id": "s-12",
+  "ts": 1751421002030,
+  "payload": {
+    "ref": "c-8",
+    "status": "queued",
+    "channels": [
+      "motion",
+      "led"
+    ],
+    "queue_pos": 1
+  }
+}

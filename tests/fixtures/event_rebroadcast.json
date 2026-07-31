@@ -1,0 +1,13 @@
+{
+  "type": "event",
+  "id": "s-41",
+  "ts": 1751421003020,
+  "payload": {
+    "name": "word_read",
+    "params": {
+      "word": "elephant",
+      "streak": 5
+    },
+    "origin": "bookbot-flutter"
+  }
+}

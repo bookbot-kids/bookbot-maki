@@ -1,0 +1,8 @@
+{
+  "type": "cancel",
+  "id": "c-10",
+  "ts": 1751421004000,
+  "payload": {
+    "target": "tag:ui-idle"
+  }
+}

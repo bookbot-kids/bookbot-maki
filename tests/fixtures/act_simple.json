@@ -1,0 +1,13 @@
+{
+  "type": "act",
+  "id": "c-7",
+  "ts": 1751421001200,
+  "payload": {
+    "do": {
+      "kind": "blink"
+    },
+    "priority": "normal",
+    "on_busy": "queue",
+    "tag": "ui-idle"
+  }
+}

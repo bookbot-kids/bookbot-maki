@@ -1,0 +1,101 @@
+{
+  "type": "welcome",
+  "id": "s-1",
+  "ts": 1751421000050,
+  "payload": {
+    "ref": "c-1",
+    "protocol": 1,
+    "server": {
+      "name": "maki-puppet",
+      "version": "0.1.0"
+    },
+    "session": "af52c1",
+    "capabilities": [
+      "motion",
+      "led"
+    ],
+    "joints": {
+      "head_pan": {
+        "min": -1.0,
+        "max": 1.0,
+        "neutral": 0.0
+      },
+      "head_tilt": {
+        "min": -1.0,
+        "max": 1.0,
+        "neutral": 0.0
+      },
+      "eyes_pan": {
+        "min": -1.0,
+        "max": 1.0,
+        "neutral": 0.0
+      },
+      "eyes_tilt": {
+        "min": -1.0,
+        "max": 1.0,
+        "neutral": 0.0
+      },
+      "eyelids": {
+        "min": 0.0,
+        "max": 1.0,
+        "neutral": 1.0
+      },
+      "mouth": {
+        "min": 0.0,
+        "max": 1.0,
+        "neutral": 0.0
+      }
+    },
+    "animations": [
+      "off",
+      "breathing_cyan",
+      "breathing_white",
+      "thinking_pulse_blue",
+      "rainbow_swirl",
+      "chase_rainbow",
+      "attentive_green",
+      "observing_white",
+      "sleeping_dim_blue",
+      "breathing_slow_purple",
+      "sleep_deep_breathe",
+      "breathing_blue",
+      "sparkle_soft",
+      "glow_gold",
+      "amber_idle",
+      "surprise_flash",
+      "warm_pulse",
+      "cool_wave",
+      "attention_sweep",
+      "speaking_pulse",
+      "concurrent_listen",
+      "red_alert",
+      "boot_pulse",
+      "alarm_red",
+      "pulse_yellow",
+      "activity_joinable",
+      "activity_focused",
+      "clear_activity"
+    ],
+    "gestures": [
+      "nod",
+      "head_shake",
+      "happy_wiggle",
+      "curious_tilt",
+      "wake_up",
+      "sleepy"
+    ],
+    "events": [
+      "reading_started",
+      "page_turned",
+      "word_read",
+      "word_struggled",
+      "sentence_read",
+      "celebrate",
+      "encourage",
+      "attention",
+      "reading_finished",
+      "sleep",
+      "wake"
+    ]
+  }
+}

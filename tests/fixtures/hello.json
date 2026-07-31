@@ -1,0 +1,19 @@
+{
+  "type": "hello",
+  "id": "c-1",
+  "ts": 1751421000000,
+  "payload": {
+    "protocol": 1,
+    "client": {
+      "name": "bookbot-flutter",
+      "kind": "flutter",
+      "version": "0.1.0"
+    },
+    "priority": 50,
+    "subscribe": [
+      "state",
+      "events"
+    ],
+    "abort_on_disconnect": false
+  }
+}

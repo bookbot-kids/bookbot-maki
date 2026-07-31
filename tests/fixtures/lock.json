@@ -1,0 +1,12 @@
+{
+  "type": "lock",
+  "id": "c-15",
+  "ts": 1751421007000,
+  "payload": {
+    "scopes": [
+      "motion",
+      "led"
+    ],
+    "ttl_s": 30
+  }
+}

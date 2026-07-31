@@ -1,0 +1,11 @@
+{
+  "type": "state.get",
+  "id": "c-14",
+  "ts": 1751421006000,
+  "payload": {
+    "fields": [
+      "pose",
+      "queue"
+    ]
+  }
+}

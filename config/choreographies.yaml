@@ -1,0 +1,141 @@
+# Semantic event → action-sequence mapping (MPP/1).
+# The Flutter app sends `event {name, params}`; the gateway resolves it here.
+# Changing MAKI's personality never touches app code — edit this file (hot-reloaded on save).
+#
+# Steps use the exact same grammar as the wire protocol's `act.do` field:
+#   Step := Action | {seq: [Step...]} | {par: [Step...]}
+# `{{param|default}}` pulls from event.params with a fallback.
+
+version: 1
+
+defaults:
+  priority: normal        # low | normal | high, or 0..79
+  on_busy: replace        # queue | replace | drop
+
+# Valid event names that are intentionally no-ops today (acked as completed/no-op).
+ignored_events: [sentence_read]
+
+choreographies:
+  reading_started:
+    description: Session opener — wake up, look at the reader, warm light
+    priority: high
+    on_busy: replace
+    steps:
+      - par:
+          - { kind: led, animation: warm_pulse }
+          - { kind: gesture, name: wake_up }
+      - { kind: look, pan: 0.0, tilt: 0.1, duration_ms: 600 }
+      - { kind: blink }
+
+  page_turned:
+    description: Glance down at the page, blink, settle
+    steps:
+      - { kind: look, pan: 0.0, tilt: -0.2, duration_ms: 400 }
+      - { kind: blink }
+      - { kind: neutral, duration_ms: 500 }
+
+  word_read:
+    description: Tiny acknowledgement per word — must be cheap and interruptible
+    priority: low
+    on_busy: drop          # never queue up 20 of these
+    steps:
+      - { kind: blink }
+
+  word_struggled:
+    description: Soft curiosity — lean in, cool light, no judgement
+    steps:
+      - par:
+          - { kind: led, animation: cool_wave }
+          - { kind: gesture, name: curious_tilt }
+
+  celebrate:
+    description: Big happy reaction (page finished, goal met)
+    priority: high
+    on_busy: replace
+    steps:
+      - par:
+          - { kind: led, animation: attention_sweep }
+          - { kind: gesture, name: happy_wiggle, repeat: 2 }
+      - { kind: led, animation: steady_blue }
+
+  encourage:
+    description: Warm nudge to keep going
+    steps:
+      - { kind: led, animation: warm_pulse }
+      - { kind: gesture, name: nod }
+
+  attention:
+    description: Grab the reader's attention back to the book
+    priority: high
+    steps:
+      - par:
+          - { kind: led, animation: attention_sweep }
+          - { kind: gesture, name: wake_up }
+
+  reading_finished:
+    description: Session closer — proud nod, settle to idle
+    priority: high
+    on_busy: replace
+    steps:
+      - par:
+          - { kind: led, animation: glow_gold }
+          - { kind: gesture, name: nod, repeat: 2 }
+      - { kind: neutral, duration_ms: 800 }
+      - { kind: led, animation: steady_blue }
+
+  sleep:
+    description: Wind down — eyes droop, dim light
+    steps:
+      - par:
+          - { kind: led, animation: breathing_blue }
+          - { kind: gesture, name: sleepy }
+
+  wake:
+    description: Perk up from sleep
+    priority: high
+    on_busy: replace
+    steps:
+      - par:
+          - { kind: led, animation: steady_blue }
+          - { kind: gesture, name: wake_up }
+
+# Named gesture primitives: normalized keyframes played on the gesture layer.
+# Joint values are normalized [-1, 1] of each joint's safe range (see PROTOCOL.md).
+# The motion service's S-curve planner handles smoothing/jerk limits; the gateway
+# just streams keyframe targets. Amplitudes/periods start from the proven waveforms
+# in the vendored eye_gaze_node (nod = tilt sine, shake = pan sine).
+gestures:
+  nod:
+    keyframes:
+      - { t_ms: 0,   joints: { head_tilt: 0.0 } }
+      - { t_ms: 250, joints: { head_tilt: -0.7 } }
+      - { t_ms: 550, joints: { head_tilt: 0.25 } }
+      - { t_ms: 800, joints: { head_tilt: 0.0 } }
+  head_shake:
+    keyframes:
+      - { t_ms: 0,   joints: { head_pan: 0.0 } }
+      - { t_ms: 250, joints: { head_pan: -0.35 } }
+      - { t_ms: 600, joints: { head_pan: 0.35 } }
+      - { t_ms: 900, joints: { head_pan: 0.0 } }
+  happy_wiggle:
+    keyframes:
+      - { t_ms: 0,   joints: { head_pan: 0.0, head_tilt: 0.0 } }
+      - { t_ms: 200, joints: { head_pan: -0.25, head_tilt: -0.4 } }
+      - { t_ms: 450, joints: { head_pan: 0.25, head_tilt: 0.1 } }
+      - { t_ms: 700, joints: { head_pan: 0.0, head_tilt: 0.0 } }
+  curious_tilt:
+    keyframes:
+      - { t_ms: 0,    joints: { head_tilt: 0.0, eyes_pan: 0.0 } }
+      - { t_ms: 400,  joints: { head_tilt: -0.5, eyes_pan: 0.3 } }
+      - { t_ms: 1400, joints: { head_tilt: -0.5, eyes_pan: 0.3 } }
+      - { t_ms: 1900, joints: { head_tilt: 0.0, eyes_pan: 0.0 } }
+  wake_up:
+    keyframes:
+      - { t_ms: 0,   joints: { head_tilt: 0.3, eyelids: 0.2 } }
+      - { t_ms: 300, joints: { head_tilt: -0.3, eyelids: 1.0 } }
+      - { t_ms: 700, joints: { head_tilt: 0.0, eyelids: 1.0 } }
+  sleepy:
+    keyframes:
+      - { t_ms: 0,    joints: { head_tilt: 0.0, eyelids: 1.0 } }
+      - { t_ms: 800,  joints: { head_tilt: 0.35, eyelids: 0.3 } }
+      - { t_ms: 1600, joints: { head_tilt: 0.45, eyelids: 0.1 } }

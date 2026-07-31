@@ -1,0 +1,9 @@
+{
+  "type": "ack",
+  "id": "s-14",
+  "ts": 1751421002060,
+  "payload": {
+    "ref": "c-22",
+    "status": "dropped"
+  }
+}

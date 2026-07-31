@@ -1,0 +1,41 @@
+{
+  "type": "act",
+  "id": "c-8",
+  "ts": 1751421002000,
+  "payload": {
+    "priority": "high",
+    "on_busy": "replace",
+    "do": {
+      "seq": [
+        {
+          "par": [
+            {
+              "kind": "gesture",
+              "name": "nod",
+              "repeat": 2
+            },
+            {
+              "kind": "led",
+              "animation": "attention_sweep"
+            }
+          ]
+        },
+        {
+          "kind": "look",
+          "pan": 0.0,
+          "tilt": 0.1,
+          "eyes_only": false,
+          "duration_ms": 600
+        },
+        {
+          "kind": "wait",
+          "duration_ms": 300
+        },
+        {
+          "kind": "led",
+          "animation": "breathing_cyan"
+        }
+      ]
+    }
+  }
+}

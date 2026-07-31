@@ -1,0 +1,9 @@
+{
+  "type": "ack",
+  "id": "s-15",
+  "ts": 1751421002070,
+  "payload": {
+    "ref": "c-7",
+    "status": "superseded"
+  }
+}

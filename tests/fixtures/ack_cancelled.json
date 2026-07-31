@@ -1,0 +1,9 @@
+{
+  "type": "ack",
+  "id": "s-16",
+  "ts": 1751421005010,
+  "payload": {
+    "ref": "c-8",
+    "status": "cancelled"
+  }
+}

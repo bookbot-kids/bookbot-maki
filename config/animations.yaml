@@ -1,0 +1,173 @@
+# Defines the properties for named LED animations for MAKI.
+
+animations:
+  # --- Standard Animations ---
+  "off":
+    type: "static"
+    color: [0, 0, 0]
+    period: 1.0
+
+  # Default resting light: steady, non-pulsing blue. `static` holds one colour
+  # with no cycle, so there is no visible flashing/breathing at rest.
+  steady_blue:
+    type: "static"
+    color: [0, 80, 200]
+    period: 1.0
+
+  breathing_cyan:
+    type: "breathing"
+    # Softer blue to reduce perceived brightness
+    color: [0, 90, 180]
+    period: 4.0
+
+  breathing_white:
+    type: "breathing"
+    color: [150, 150, 150]
+    period: 5.0
+
+  thinking_pulse_blue:
+    type: "breathing"
+    color: [0, 100, 255]
+    period: 3.0
+
+  rainbow_swirl:
+    type: "rainbow"
+    color: [0, 0, 0]  # color is ignored for rainbow
+    period: 5.0
+
+  # Spatial chase: each pixel gets its own hue, rotating around the strip
+  # (as opposed to rainbow_swirl, which cycles the whole ring through one hue).
+  chase_rainbow:
+    type: "chase_rainbow"
+    color: [0, 0, 0]  # color is ignored for chase_rainbow
+    # One full revolution takes exactly `period`. Callers that want a single
+    # revolution hold it for this long and then switch away, so changing this
+    # value must be matched by RAINBOW_MS in maki_puppet/bridge.py and
+    # boot.startup.duration_s in puppet.yaml.
+    period: 1.5
+
+  attentive_green:
+    type: "breathing"
+    color: [0, 180, 0]
+    period: 3.0
+
+  observing_white:
+    type: "breathing"
+    color: [255, 255, 255]
+    period: 3.5
+
+  sleeping_dim_blue:
+    type: "breathing"
+    color: [0, 0, 60]
+    period: 8.0
+
+  breathing_slow_purple:
+    type: "breathing"
+    color: [60, 0, 80]
+    period: 8.0
+
+  # H3: Very slow dim breathing for deep sleep (after breathing_slow_purple)
+  sleep_deep_breathe:
+    type: "breathing"
+    color: [30, 0, 45]
+    period: 12.0
+
+  breathing_blue:
+    type: "breathing"
+    color: [0, 80, 220]
+    period: 3.0
+
+  sparkle_soft:
+    type: "breathing"
+    color: [160, 70, 200]
+    period: 2.4
+
+  glow_gold:
+    type: "breathing"
+    color: [200, 160, 40]
+    period: 4.8
+
+  amber_idle:
+    type: "breathing"
+    color: [120, 100, 60]
+    period: 5.6
+
+  # --- F4: Reactive patterns ---
+
+  # Warm amber pulse for surprise/startle — replaces old flash to avoid strobing
+  surprise_flash:
+    type: "breathing"
+    color: [200, 160, 30]
+    period: 2.5
+
+  # Warm gentle pulse for affirmative/happy reactions
+  warm_pulse:
+    type: "breathing"
+    color: [220, 130, 40]
+    period: 3.5
+
+  # Cool breathing for calm/sad/empathetic states
+  cool_wave:
+    type: "breathing"
+    color: [40, 160, 200]
+    period: 3.2
+
+  # Fast rainbow sweep for excited/playful attention
+  attention_sweep:
+    type: "rainbow"
+    color: [0, 0, 0]
+    period: 1.8
+
+  # F5: warm rose-gold pulse during TTS speech playback
+  speaking_pulse:
+    type: "breathing"
+    color: [150, 60, 60]
+    period: 3.0
+
+  # Phase 4.2: slow teal pulse when speaking AND listening concurrently
+  concurrent_listen:
+    type: "breathing"
+    color: [0, 140, 120]
+    period: 4.0
+
+  # P2.2: Safety/emergency alert — urgent red breathing (SAFETY goal only)
+  red_alert:
+    type: "breathing"
+    color: [220, 0, 0]
+    period: 1.5
+
+  # Kiosk startup choreography — slow muted blue-cyan pulse during boot
+  boot_pulse:
+    type: "breathing"
+    color: [0, 120, 180]
+    period: 4.0
+
+  # Watchdog overheating alert — urgent deep-red breathing
+  alarm_red:
+    type: "breathing"
+    color: [255, 0, 0]
+    period: 1.2
+
+  # Watchdog warning — warm/thermal/strain/stale alerts
+  pulse_yellow:
+    type: "breathing"
+    color: [220, 180, 0]
+    period: 3.0
+
+  # Phase 7: Activity busy-but-joinable — soft amber pulse
+  activity_joinable:
+    type: "breathing"
+    color: [200, 140, 20]
+    period: 4.0
+
+  # Phase 7: Activity focused (low interruptibility) — steady warm
+  activity_focused:
+    type: "static"
+    color: [120, 80, 10]
+    period: 1.0
+
+  # Phase 7: Clear activity-specific cue — return to neutral ambient glow
+  clear_activity:
+    type: "breathing"
+    color: [0, 90, 180]
+    period: 4.0

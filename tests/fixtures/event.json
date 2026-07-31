@@ -1,0 +1,12 @@
+{
+  "type": "event",
+  "id": "c-9",
+  "ts": 1751421003000,
+  "payload": {
+    "name": "word_read",
+    "params": {
+      "word": "elephant",
+      "streak": 5
+    }
+  }
+}

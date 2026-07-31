@@ -1,0 +1,43 @@
+{
+  "type": "state",
+  "id": "s-40",
+  "ts": 1751421010000,
+  "payload": {
+    "pose": {
+      "head_pan": 0.12,
+      "head_tilt": -0.05,
+      "eyes_pan": 0.0,
+      "eyes_tilt": 0.1,
+      "eyelids": 1.0,
+      "mouth": 0.0
+    },
+    "led": {
+      "animation": "breathing_cyan"
+    },
+    "queue": {
+      "depth": 2,
+      "active_id": "c-8",
+      "active_client": "bookbot-flutter"
+    },
+    "estop": false,
+    "lock": {
+      "held_by": null,
+      "scopes": []
+    },
+    "clients": [
+      {
+        "name": "bookbot-flutter",
+        "kind": "flutter"
+      },
+      {
+        "name": "reading-brain",
+        "kind": "python"
+      }
+    ],
+    "health": {
+      "servo": "up",
+      "led": "up",
+      "loop_hz": 49.9
+    }
+  }
+}

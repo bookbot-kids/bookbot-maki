@@ -1,0 +1,11 @@
+{
+  "type": "ack",
+  "id": "s-20",
+  "ts": 1751421003100,
+  "payload": {
+    "ref": "c-21",
+    "status": "error",
+    "code": "unknown_animation",
+    "detail": "no animation 'sparkle_red'; see welcome.animations"
+  }
+}

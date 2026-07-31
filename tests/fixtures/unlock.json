@@ -1,0 +1,11 @@
+{
+  "type": "unlock",
+  "id": "c-16",
+  "ts": 1751421008000,
+  "payload": {
+    "scopes": [
+      "motion",
+      "led"
+    ]
+  }
+}
