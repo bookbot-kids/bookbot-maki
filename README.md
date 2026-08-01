@@ -58,7 +58,7 @@ actually running, so clients can feature-detect it. See
 Tuning lives in the `vision.tracking` block of `puppet.yaml`. Those values are the
 **robot's deployed ROS tuning**, carried across verbatim — not the ROS node's declared
 defaults, which differ and were never what actually ran. The two knobs that matter
-most are `camera_hfov_deg`/`camera_vfov_deg` (62/49 for the Arducam IMX219 — wrong FOV
+most are `camera_hfov_deg`/`camera_vfov_deg` (62/49, measured on this robot's Arducam IMX179 — wrong FOV
 makes the head consistently over- or under-shoot, and no gain tuning compensates) and
 `head_reanchor_threshold_rad` (lower tracks more tightly but fidgets more).
 
@@ -70,7 +70,7 @@ detections — so tracking behaviour can be observed and tuned without hardware.
 ## Quick start — dev machine (no hardware)
 
 ```bash
-cd bookbot-maki
+cd maki-puppet
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
@@ -87,23 +87,45 @@ python -m maki_client --host localhost demo
 
 ## Quick start — robot
 
-From the repo root on your dev machine (pass the robot as `<user>@<robot-ip>`;
-override with `ROBOT_HOST=user@host` or a positional `user@host` argument):
+> **You need the robot's address, SSH user and venv path.** They are deliberately
+> not in this repo — they live with the robot's own notes (`bookbot-maki`,
+> `README_CONNECT_MAKI.md`). Ask for them, or read them off the robot. Everything
+> below takes `<user>@<robot-ip>` as an argument, so nothing here is hardcoded.
+
+From the repo root on your dev machine:
 
 ```bash
-scripts/deploy_puppet.sh
+scripts/deploy_puppet.sh <user>@<robot-ip>     # or: ROBOT_HOST=user@host scripts/deploy_puppet.sh
 ```
 
-This rsyncs the package to `~/maki_puppet` on the robot, installs it into the
-existing `~/lux_robot_venv` with the `[robot]` hardware extras, and stops any
-previously running puppet. Then, on the robot:
+This rsyncs the package to **`~/bookbot-maki`** on the robot (override with
+`ROBOT_PUPPET_DIR`), installs it into the robot's venv (default `~/lux_robot_venv`,
+override with `ROBOT_VENV`) with the `[robot]` hardware extras, and **stops** any
+running gateway. It does not start one again — deploy, then restart:
+
+```bash
+ssh <user>@<robot-ip> '~/bookbot-maki/scripts/restart_puppet.sh'
+```
+
+`restart_puppet.sh` stops the running gateway with SIGTERM (so servos are torqued
+off and locks released cleanly), starts it the same way the boot script does, and
+waits until it actually serves — reporting the startup log instead of claiming
+success for a process that died on a busy serial port. Use it rather than
+rebooting: ~10 s versus ~90 s, and the Flutter app simply reconnects.
+
+The remote directory **must** match the checkout the robot's boot script runs
+(`start_bookbot_linux.sh`, default `~/bookbot-maki`). Deploying anywhere else
+creates a second tree that nothing executes — a trap that has cost real debugging
+time.
+
+To run it by hand instead:
 
 ```bash
 ssh <user>@<robot-ip>
-~/maki_puppet/scripts/run_puppet.sh
+~/bookbot-maki/scripts/run_puppet.sh
 # equivalent to:
 #   source ~/lux_robot_venv/bin/activate
-#   python -m maki_puppet --config ~/maki_puppet/config/puppet.yaml
+#   cd ~/bookbot-maki && python -m maki_puppet --config config/puppet.yaml
 ```
 
 Bench smoke test from your laptop (blink → look → nod → shake → LED cycle → home):
@@ -122,6 +144,7 @@ smoke test passes; instructions are in the unit's header comment.
 |---|---|
 | [`PROTOCOL.md`](PROTOCOL.md) | **MPP/1 wire contract — the source of truth.** Message types, action grammar, error codes, arbitration. |
 | [`docs/FLUTTER.md`](docs/FLUTTER.md) | Guide for driving MAKI from the Flutter app (no robotics knowledge needed). |
+| [`docs/LED_NOISE.md`](docs/LED_NOISE.md) | **Read before touching LED code to chase white flashes.** They are electrical noise from the servo bus, proven not to be a software fault. |
 | [`config/puppet.yaml`](config/puppet.yaml) | Runtime config: server port, serial port, joint limits/signs, motion profiles, idle policy. |
 | [`config/choreographies.yaml`](config/choreographies.yaml) | Semantic events (`celebrate`, `page_turned`, …) → action sequences, plus gesture keyframes. MAKI's personality lives here — retune without touching app code. |
 | [`config/animations.yaml`](config/animations.yaml) | LED ring animation definitions. |
@@ -129,7 +152,76 @@ smoke test passes; instructions are in the unit's header comment.
 | [`models/`](models/) | Vendored vision models (YuNet face detection). No download step on deploy. |
 | `clients/python/maki_client/` | Python SDK + CLI (`python -m maki_client`). |
 | `scripts/smoke.py` | Bench acceptance script (run from the laptop against the robot). |
+| `scripts/deploy_puppet.sh` | rsync this checkout to the robot + reinstall into its venv. Stops the gateway; does not restart it. |
+| `scripts/restart_puppet.sh` | Stop and restart the gateway on the robot, waiting until it actually serves. Run this after a deploy. |
 | `deploy/maki-puppet.service` | Optional systemd user unit for run-at-boot. |
+
+## Making changes
+
+**Where behaviour actually lives.** There are two places, and the split is not
+obvious:
+
+| | |
+|---|---|
+| [`maki_puppet/bridge.py`](maki_puppet/bridge.py) | The **Bookbot app events** — 15 of them (`tap_book`, `book_rate`, `tap_page`, …), one `on_<name>` handler each, plus the colour vocabulary as module constants. This is where the app's reactions live: the tap flourish, ratings holding their colour, the head-down posture while a book is open. |
+| [`config/choreographies.yaml`](config/choreographies.yaml) | The **semantic events** (`celebrate`, `page_turned`, …) and the gesture keyframe library. |
+
+**Bridge handlers take precedence**: an event named in `EVENT_PARAMS` shadows a
+choreography of the same name. Both are advertised together in `welcome.events`.
+So if editing a choreography changes nothing, check whether a bridge handler is
+shadowing it.
+
+**Adding an app event** takes two coupled edits — a name in `EVENT_PARAMS` *and*
+a matching `async def on_<name>` method. A name without a handler raises at
+dispatch; a handler without a name is never called. `tests/test_bridge.py`
+asserts the two sets match exactly, so a mismatch fails the suite rather than
+the robot.
+
+**What reloads, and what does not.** `choreographies.yaml` is watched and
+hot-reloaded on save. Everything else — `puppet.yaml`, `animations.yaml`, and all
+Python — needs a gateway restart. After deploying, restart with
+`~/bookbot-maki/scripts/restart_puppet.sh`; the gateway log is
+`~/run_puppet_log.txt` on the robot (override with `MAKI_PUPPET_LOG`).
+
+**Config beats code.** Values absent from `puppet.yaml` silently fall back to the
+constants in the module that reads them, which may differ from what the robot was
+tuned with. When comparing against a version that behaved differently, diff for
+*absent* keys, not just changed ones — an absent key is not a match.
+
+**Coupled values.** Some settings must be changed together; the config comments
+say so at each site (e.g. an animation's `period` and whatever holds it for that
+long). Search for "must be matched by" before changing a timing value.
+
+**Verification ladder**, cheapest first:
+
+```bash
+pytest                                   # everything hardware-free (motion math, engine, protocol, sim)
+python -m maki_puppet --sim              # whole stack, no hardware
+python scripts/smoke.py --host <robot>   # on the real robot: blink → look → nod → LED → home
+```
+
+Sim cannot tell you about servo load, LED appearance, or timing under real
+hardware — anything touching those needs the robot and a person watching.
+
+## Autonomous behaviour
+
+MAKI moves **without any client connected**. Two behaviours do this, and both
+surprise people:
+
+- **Idle** — random blinks and the resting LED animation after `idle.delay_s`.
+- **Autonomous face-following** — `vision.auto_track.enabled` is **`true` by
+  default**: the head follows whoever is in front of it, with no `track` action
+  and no client involvement. The client-driven `track` action is a separate,
+  explicit override.
+
+Face-following **stands down while a `posture` is held** (`yield_to_posture`), so
+opening a book pins the head at the page instead of chasing faces, and closing it
+resumes following. If the head "won't stay where I put it", check whether you used
+`pose` (momentary, its layer claim expires in ~1 s) rather than `posture`
+(sustained until cleared) — see [PROTOCOL.md §6](PROTOCOL.md).
+
+The gateway also runs scripted wake and sleep sequences at start and stop that
+physically move the head and take a couple of seconds each.
 
 ## Troubleshooting
 
@@ -144,7 +236,7 @@ process owns the hardware.
 
 **`ModuleNotFoundError: dynamixel_sdk` / `board` / `neopixel_spi`.**
 The Pi-only hardware extras are not installed in the environment you're running.
-On the robot: `source ~/lux_robot_venv/bin/activate && pip install -e "$HOME/maki_puppet[robot]"`
+On the robot: `source ~/lux_robot_venv/bin/activate && pip install -e "$HOME/bookbot-maki[robot]"`
 (the deploy script does this for you). On a dev machine these packages are neither
 needed nor installable — run with `--sim` instead.
 
@@ -176,4 +268,4 @@ all, check the gateway process is still running before assuming e-stop.
 **Servos won't move but the server is up.**
 Check the `state` push (`python -m maki_client --host <robot> state`): `estop: true`
 means see above; `health.servo` not `"up"` means the serial bus is unhappy — check
-the U2D2 on `/dev/ttyUSB0` and the servo power supply, then restart the gateway.
+the USB serial adapter (an FT232H on this robot) on `/dev/ttyUSB0` and the servo power supply, then restart the gateway.

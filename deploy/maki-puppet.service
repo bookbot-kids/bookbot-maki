@@ -7,7 +7,7 @@
 #
 # Install (as the lux user, no sudo):
 #   mkdir -p ~/.config/systemd/user
-#   cp ~/maki_puppet/deploy/maki-puppet.service ~/.config/systemd/user/
+#   cp ~/bookbot-maki/deploy/maki-puppet.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now maki-puppet
 #   loginctl enable-linger "$USER"     # keep it running with no SSH session
@@ -24,7 +24,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/maki_puppet/scripts/run_puppet.sh
+ExecStart=%h/bookbot-maki/scripts/run_puppet.sh
 Restart=on-failure
 RestartSec=2
 # SIGTERM triggers ServoBus torque-off + lock release; give it time to finish.

@@ -128,8 +128,9 @@ client library consumes those for you.
 Alongside the choreographed events above, the gateway accepts **app events**: raw
 Bookbot UI moments. These route to Python code (`maki_puppet/bridge.py`,
 class `AppEventBridge`) instead of `choreographies.yaml` — one `on_<event>` handler
-per event, platform-channel style. The handlers ship **blank**; whoever owns robot
-behavior fills them in, and the app never changes.
+per event, platform-channel style. **All 15 are implemented** — sending them
+produces real robot behaviour today (see the table below and PROTOCOL.md §10.2b).
+Retuning that behaviour means editing `bridge.py`; the app never changes.
 
 Use the typed sender in `maki_flutter_poc/lib/maki_bridge.dart` rather than
 hand-writing names — every method is fire-and-forget and safe to call straight from
@@ -163,8 +164,15 @@ events.bookRate(5);
 | `tap_page` | `tapPage(page)` | `page` (int) |
 | `book_rate` | `bookRate(rating)` | `rating` (int, 1–5) |
 
-Semantics: a blank handler acks `completed` (detail `"bridge"`) and does nothing —
-sending these today is already safe. A handler that raises returns an `error` ack
+What they do: `tap_book` plays the tap flourish (red/yellow/green, 200 ms each)
+and pins MAKI's head down at the page until `close_book`; `book_rate` shows that
+rating's colour and **holds** it until another rating or until you navigate back
+to the library; `tap_page` flourishes and returns the ring to the colour it had;
+the correct/incorrect events flash green/orange for 2 s then return to the
+listening colour; `listen` turns the ring white. Colour vocabulary: blue =
+resting, white = listening, green = correct, orange = incorrect.
+
+Semantics: a handler acks `completed` (detail `"bridge"`). A handler that raises returns an `error` ack
 with code `internal`; the app should treat that as non-fatal (log and move on).
 These names appear in `welcome.events` next to the choreographed ones, and bridge
 names shadow any same-named choreography.

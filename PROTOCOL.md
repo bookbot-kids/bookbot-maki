@@ -226,7 +226,8 @@ mirrored 1:1 in `tests/fixtures/`.
       "eyelids":   { "min": 0.0, "max": 1.0, "neutral": 1.0 },
       "mouth":     { "min": 0.0, "max": 1.0, "neutral": 0.0 }
     },
-    "animations": ["off", "breathing_cyan", "breathing_white", "thinking_pulse_blue",
+    "animations": ["off", "steady_blue", "breathing_cyan", "breathing_white",
+                   "thinking_pulse_blue",
                    "rainbow_swirl", "chase_rainbow", "attentive_green", "observing_white",
                    "sleeping_dim_blue", "breathing_slow_purple", "sleep_deep_breathe",
                    "breathing_blue", "sparkle_soft", "glow_gold", "amber_idle",
@@ -242,8 +243,11 @@ mirrored 1:1 in `tests/fixtures/`.
 ```
 
 - `capabilities`: subset of `["motion", "mouth", "led", "tts", "vision"]`. **Current
-  builds exclude `"tts"`** (§1.3). `"vision"` is present only when a camera is
-  configured and running — feature-detect face tracking by checking for it, and the
+  builds exclude `"tts"`** (§1.3). `"vision"` is present when a camera is
+  **configured** (`vision.enabled`). It is fixed at construction, before the camera
+  is opened, so it does NOT prove a camera came up — a camera that fails to open
+  still leaves `"vision"` advertised, and `track` then rejects with
+  `vision_unavailable`. Use `state.health.vision` for liveness. Feature-detect by checking for it, and the
   viseme stream by checking for `"mouth"`.
 - `animations` / `gestures` / `events`: the live catalogs. `events` is the union of
   choreography names and `ignored_events` from `choreographies.yaml` — i.e. every name
@@ -517,13 +521,13 @@ arguments are ignored.
 | `blink` | motion | `duration_ms` (150) | Close and reopen the eyelids once. |
 | `look` | motion | `pan` (0.0), `tilt` (0.0) in [−1,1]; `eyes_only` (false); `duration_ms` (600) | Smoothly orient toward (pan, tilt). `eyes_only:true` moves only the eyes; otherwise head and eyes move together. |
 | `eyelids` | motion | `openness` (required) in [0,1]; `duration_ms` (300) | Set eyelid openness (both lids, mirrored). |
-| `mouth` | motion | `openness` (required) in [0,1]; `duration_ms` (200) | Set mouth openness. |
+| `mouth` | **mouth** | `openness` (required) in [0,1]; `duration_ms` (200) | Set mouth openness. Occupies the dedicated `mouth` channel (§1.3), not `motion`, so speech and gesture never arbitrate against each other. |
 | `pose` | motion | `joints` (required): map of wire joints (§1.2) → normalized values; `duration_ms` (800) | Move an arbitrary subset of joints. Unknown joint name → `unknown_joint`; value out of range → `out_of_range`. |
 | `gesture` | motion | `name` (required); `repeat` (1, max 10); `intensity` (1.0, range 0–2] | Play a named keyframe gesture from the server library (§10.2). Unknown name → `unknown_gesture`. `intensity` scales joint amplitudes (server clamps the result to safe ranges). |
 | `led` | led | exactly one of `animation` (name from `welcome.animations`) or `color` `{r,g,b}` 0–255 each | Switch the ring to a named animation, or a static solid color. Unknown animation → `unknown_animation`; both/neither argument → `out_of_range`. |
 | `say` | tts | `text` (required) | **Deferred.** While `"tts"` is absent from `welcome.capabilities`, any wire act containing `say` is rejected whole with `tts_unavailable`. (§1.3; choreography-side `say` steps are instead skipped at runtime — §10.5.) |
 | `wait` | — | `duration_ms` (required, 0–60000) | Pause. Occupies no channel by itself; inside a composed act it simply delays within the act's existing channel claim. |
-| `neutral` | motion | `duration_ms` (700) | Return all joints to the neutral pose. |
+| `neutral` | motion | `duration_ms` (700) | Return all joints **except the mouth** to the neutral pose, then release the layer. The mouth is excluded because it is driven externally by the viseme stream (§5.13) — homing it here would snap it shut mid-word. |
 | `posture` | motion | either `joints` (map of wire joints → normalized values) or `clear: true` | Hold a **sustained** baseline pose until it is explicitly cleared. Same joint validation as `pose`. Completes immediately — it installs the posture rather than waiting on it, so it takes no `duration_ms`. |
 | `track` | motion | `target` (`"face"`); `duration_ms` (5000); `eyes_only` (false) | Follow a detected face for `duration_ms` — head and eyes together, or `eyes_only:true` for eyes alone. Requires `"vision"` in `welcome.capabilities`; otherwise the whole act is rejected with `vision_unavailable`. Unknown `target` → `out_of_range`. |
 
@@ -765,15 +769,46 @@ gestures:
 | `word_read` | **low** | **drop** | Single blink. Deliberately cheap and droppable — per-word events must never build lag. |
 | `word_struggled` | normal | replace | Cool LED wave + curious head tilt (lean-in, no judgement). |
 | `sentence_read` | — | — | **Ignored** (valid, acked `completed`/no-op). Reserved. |
-| `celebrate` | high | replace | Rainbow sweep + double happy wiggle, then back to breathing cyan. |
+| `celebrate` | high | replace | Rainbow sweep + double happy wiggle, then back to `steady_blue`. |
 | `encourage` | normal | replace | Warm pulse + nod. |
 | `attention` | high | replace | Rainbow sweep + wake-up gesture. |
-| `reading_finished` | high | replace | Gold glow + double nod, settle, back to breathing cyan. |
+| `reading_finished` | high | replace | Gold glow + double nod, settle, back to `steady_blue`. |
 | `sleep` | normal | replace | Dim blue breathing + eyes-droop gesture. |
-| `wake` | high | replace | Breathing cyan + wake-up gesture. |
+| `wake` | high | replace | `steady_blue` + wake-up gesture. |
 
 Gesture library: `nod`, `head_shake`, `happy_wiggle`, `curious_tilt`, `wake_up`,
 `sleepy`.
+
+### 10.2b Bookbot app events (bridge)
+
+A second family of events is served by `maki_puppet/bridge.py` rather than by
+`choreographies.yaml`. They are the Bookbot **app's UI events**, they carry their
+own parameters, and they are advertised in `welcome.events` alongside the
+choreography names above — a client cannot tell the two apart on the wire.
+
+**Bridge handlers take precedence:** an event implemented in the bridge shadows a
+choreography of the same name. Editing a choreography that a bridge handler
+shadows has no effect.
+
+| Event | Params | Physical behavior |
+|---|---|---|
+| `tap_profile` / `tap_category` / `tap_series` / `tap_starred` | `profile` / `category` / `series` / `book`,`level` | Tap flourish, then settle on resting blue. Leaving a book for the library is what clears a held rating colour. |
+| `tap_book` | `book`, `level` | Tap flourish, and install a **sustained head-down `posture`** so MAKI keeps looking at the page for as long as the book is open (§6). |
+| `close_book` | `book`, `level` | Clear the posture, head back to level, ring to resting blue. |
+| `tap_page` | `page` | Tap flourish, then return the ring to whatever colour it was showing before. |
+| `book_rate` | `rating` (1-5) | Show that rating's colour and **hold it** — it is a standing indicator, not a flash. Cleared by another rating or by navigating back to the library/home. Ratings outside 1-5 are ignored. |
+| `practice_correct` / `focus_word_correct` | `word` | Green for 2 s, then back to the listening colour. |
+| `practice_incorrect` / `focus_word_incorrect` | `word` | Orange (deliberately not red) for 2 s, then back to the listening colour. |
+| `read_to_me` / `mute` | — | Resting blue. |
+| `listen` | — | White — actively listening to the child read. |
+
+The "tap flourish" is red → yellow → green, 200 ms each, then back to the
+originating colour. It is three static colours rather than an animation on
+purpose: see [`docs/LED_NOISE.md`](docs/LED_NOISE.md).
+
+Colour vocabulary (wire RGB, scaled by the ring's own brightness caps): blue =
+resting/not reading, white = listening, green = correct, orange = incorrect,
+red/yellow = rating values. All defined as constants at the top of `bridge.py`.
 
 ### 10.3 Parameter templating
 
@@ -814,7 +849,7 @@ also the reply to `state.get`. Full example in §5.12.
 | `estop` | bool | E-stop engaged. |
 | `lock` | object | `held_by` (client name or `null`), `scopes` (locked channels). |
 | `clients` | array | Connected clients: `{name, kind}`. |
-| `health` | object | `servo`: `"up"` \| `"sim"` \| `"degraded"` (bus errors, holding last-known feedback); `led`: `"up"` \| `"sim"`; `loop_hz`: measured motion-loop rate. Additive fields may appear (§13). |
+| `health` | object | `servo`: `"up"` \| `"sim"`; `led`: `"up"` \| `"sim"`; `vision`: `"off"` (no camera configured) \| `"down"` (configured, not running) \| `"up"` \| `"sim"` — this, not `welcome.capabilities`, is what tells you a camera is actually alive; `loop_hz`: the **configured** motion-loop rate from `motion.rate_hz`, not a measured one. Additive fields may appear (§13). |
 
 On-change pushes are rate-limited to the state of the world, not per-ack — clients
 needing per-action lifecycle detail should use acks, not state.
@@ -861,12 +896,13 @@ Informative — the normative list is `welcome.animations` at runtime.
 
 | Name | Type | Color (R,G,B) | Period (s) | Intended use |
 |---|---|---|---|---|
-| `off` | static | 0,0,0 | — | Ring dark |
-| `breathing_cyan` | breathing | 0,90,180 | 4.0 | Default idle |
+| `off` | static | 0,0,0 | — | Ring dark. Requests for `off` are redirected to the ambient default so the ring never goes fully dark. |
+| `steady_blue` | static | 0,80,200 | — | **The default.** `led.default_animation` and the idle animation — a steady, non-pulsing resting light. |
+| `breathing_cyan` | breathing | 0,90,180 | 4.0 | Code-level fallback if `default_animation` is unset in config |
 | `breathing_white` | breathing | 150,150,150 | 5.0 | |
 | `thinking_pulse_blue` | breathing | 0,100,255 | 3.0 | "Thinking" |
 | `rainbow_swirl` | rainbow | — | 5.0 | Playful |
-| `chase_rainbow` | chase_rainbow | — | 0.5 | Spatial rainbow chase; `period` is exactly one revolution |
+| `chase_rainbow` | chase_rainbow | — | 2.5 | Spatial rainbow chase; `period` is exactly one revolution. Nothing uses it by default — see [`docs/LED_NOISE.md`](docs/LED_NOISE.md). |
 | `attentive_green` | breathing | 0,180,0 | 3.0 | |
 | `observing_white` | breathing | 255,255,255 | 3.5 | |
 | `sleeping_dim_blue` | breathing | 0,0,60 | 8.0 | Sleep |
@@ -928,7 +964,7 @@ the servo layer (`JOINT_LIMITS_TICKS`; tick = `2048 + sign·rad·2048/π`).
 | Physical joint | Tick range |
 |---|---|
 | `head_pan` | 1348 – 2748 |
-| `head_tilt` | 1800 – 2150 |
+| `head_tilt` | 1800 – 2300 |
 | `eyes_pan` | 1846 – 2250 |
 | `eyes_tilt` | 1600 – 2200 |
 | `left_eyelid` | 1448 – 2096 |
