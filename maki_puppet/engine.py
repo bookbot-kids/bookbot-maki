@@ -78,6 +78,8 @@ class ActionEngine:
         led: Any,
         *,
         get_gesture: Callable[[str], list],
+        vision: Optional[Any] = None,
+        tracker_config: Optional[Any] = None,
         ack_cb: Optional[AckCallback] = None,
         state_changed_cb: Optional[Callable[[], None]] = None,
         alarm_animation: str = "alarm_red",
@@ -87,6 +89,10 @@ class ActionEngine:
         self._motion = motion
         self._led = led
         self._get_gesture = get_gesture
+        # Public: app.py clears `vision` if the camera fails to start, so the
+        # `track` action rejects instead of running against a dead service.
+        self.vision = vision
+        self.tracker_config = tracker_config
         self.ack_cb = ack_cb
         self.state_changed_cb = state_changed_cb
         self._alarm_animation = alarm_animation
@@ -238,6 +244,8 @@ class ActionEngine:
         perf.ctx = ActionContext(
             motion=self._motion,
             led=self._led,
+            vision=self.vision,
+            tracker_config=self.tracker_config,
             get_gesture=self._get_gesture,
             claim_layer=lambda layer, p=perf: self._layer_owner.__setitem__(layer, p),
         )

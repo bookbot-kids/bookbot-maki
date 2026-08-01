@@ -107,18 +107,16 @@ async def test_every_event_produces_a_robot_reaction():
         assert robot.calls, f"on_{name} did nothing"
 
 
-async def test_book_rate_maps_each_rating_to_its_colour():
-    from maki_puppet.bridge import GREEN, RATING_COLORS
+async def test_book_rate_shows_its_colour_and_holds_it():
+    """The rating colour is a standing indicator, not a momentary flash: it
+    must be set once with no timed revert back to some resting colour."""
+    from maki_puppet.bridge import RATING_COLORS
 
     for rating, expected in RATING_COLORS.items():
         robot = _RecordingRobot()
         await AppEventBridge(robot).dispatch("book_rate", {"rating": rating})
-        step = robot.calls[0][1][0]           # the composed seq step
-        first_led = step["seq"][0]["color"]
-        last_led = step["seq"][-1]["color"]
-        assert (first_led["r"], first_led["g"], first_led["b"]) == expected
-        # Every rating settles on green afterwards.
-        assert (last_led["r"], last_led["g"], last_led["b"]) == GREEN
+        assert [c[0] for c in robot.calls] == ["led_color"]
+        assert robot.calls[0][1] == expected
 
 
 async def test_book_rate_ignores_out_of_range_and_missing():
@@ -233,3 +231,130 @@ async def test_unknown_event_still_rejected(app):
     acks = await c.acks_until_terminal(mid)
     assert acks[-1]["status"] == "error"
     assert acks[-1]["code"] == "unknown_event"
+
+
+# ── Head posture across a reading session ───────────────────────────────────
+
+
+def _submitted(robot):
+    """The step passed to the recording robot's `act` call.
+
+    Handlers may query the robot first (e.g. led_state), so the act call is
+    not necessarily calls[0].
+    """
+    act = next(c for c in robot.calls if c[0] == "act")
+    return act[1][0]
+
+
+def _flatten(step):
+    """All leaf action dicts in a composed seq/par step, in order."""
+    if isinstance(step, dict) and "seq" in step:
+        return [a for c in step["seq"] for a in _flatten(c)]
+    if isinstance(step, dict) and "par" in step:
+        return [a for c in step["par"] for a in _flatten(c)]
+    return [step]
+
+
+async def test_tap_book_holds_head_down_as_a_posture_not_a_pose():
+    """A `pose` would decay when the gesture layer's claim expires, so the head
+    must be held with `posture` to stay down for the whole book."""
+    from maki_puppet.bridge import HEAD_DOWN
+
+    robot = _RecordingRobot()
+    await AppEventBridge(robot).dispatch("tap_book", {"book": "Cat Hat", "level": "3"})
+    actions = _flatten(_submitted(robot))
+    postures = [a for a in actions if a.get("kind") == "posture"]
+    assert len(postures) == 1, "tap_book must hold exactly one posture"
+    assert postures[0]["joints"]["head_tilt"] == HEAD_DOWN
+    assert not any(a.get("kind") == "pose" for a in actions), (
+        "head-down must not be a pose — it would drift back up"
+    )
+
+
+async def test_close_book_clears_the_posture_before_lifting_the_head():
+    from maki_puppet.bridge import HEAD_LEVEL
+
+    robot = _RecordingRobot()
+    await AppEventBridge(robot).dispatch("close_book", {"book": "Cat Hat", "level": "3"})
+    actions = _flatten(_submitted(robot))
+    kinds = [a.get("kind") for a in actions]
+    assert "posture" in kinds and "pose" in kinds
+    clear = next(a for a in actions if a.get("kind") == "posture")
+    assert clear.get("clear") is True
+    # The clear has to land before the head is driven back up.
+    assert kinds.index("posture") < kinds.index("pose")
+    lift = next(a for a in actions if a.get("kind") == "pose")
+    assert lift["joints"]["head_tilt"] == HEAD_LEVEL
+
+
+# ── Rainbow restores the pre-rainbow LED state ──────────────────────────────
+
+
+class _RobotWithLed(_RecordingRobot):
+    def __init__(self, state):
+        super().__init__()
+        self._state = state
+
+    def led_state(self):
+        return self._state
+
+
+async def test_flourish_settles_back_to_the_colour_it_started_from():
+    from maki_puppet.bridge import FLOURISH_COLORS, FLOURISH_STEP_MS
+
+    robot = _RobotWithLed({"color": {"r": 12, "g": 34, "b": 56}})
+    await AppEventBridge(robot).dispatch("tap_page", {"page": 3})
+    actions = _flatten(_submitted(robot))
+
+    # red, yellow, green — each held for FLOURISH_STEP_MS — then the original.
+    shown = [(a["color"]["r"], a["color"]["g"], a["color"]["b"])
+             for a in actions if a.get("kind") == "led" and "color" in a]
+    assert shown[:3] == list(FLOURISH_COLORS)
+    waits = [a["duration_ms"] for a in actions if a.get("kind") == "wait"]
+    assert waits == [FLOURISH_STEP_MS] * len(FLOURISH_COLORS)
+    assert actions[-1]["color"] == {"r": 12, "g": 34, "b": 56}
+
+
+async def test_flourish_writes_no_animation_only_static_colours():
+    """The rainbow rewrote all 48 pixels 50x a second, which is what surfaced
+    the servo-bus noise (docs/LED_NOISE.md). The flourish must stay static."""
+    robot = _RobotWithLed({"color": {"r": 12, "g": 34, "b": 56}})
+    await AppEventBridge(robot).dispatch("tap_page", {"page": 3})
+    actions = _flatten(_submitted(robot))
+    assert not any("animation" in a for a in actions), (
+        "flourish must not use an animation"
+    )
+
+
+async def test_rainbow_restores_an_animation_not_just_a_colour():
+    robot = _RobotWithLed({"animation": "breathing_blue"})
+    await AppEventBridge(robot).dispatch("tap_page", {"page": 3})
+    actions = _flatten(_submitted(robot))
+    assert actions[-1] == {"kind": "led", "animation": "breathing_blue"}
+
+
+async def test_rainbow_falls_back_to_blue_when_led_state_is_unavailable():
+    from maki_puppet.bridge import BLUE
+
+    robot = _RobotWithLed(None)
+    await AppEventBridge(robot).dispatch("tap_page", {"page": 1})
+    actions = _flatten(_submitted(robot))
+    assert (actions[-1]["color"]["r"], actions[-1]["color"]["g"],
+            actions[-1]["color"]["b"]) == BLUE
+
+
+async def test_browsing_clears_a_held_rating_colour_to_blue():
+    """Navigating back out to the library/home is what releases the rating
+    colour, so browsing must settle on BLUE rather than restore what was up."""
+    from maki_puppet.bridge import BLUE
+
+    for event, params in (("tap_profile", {"profile": "ada"}),
+                          ("tap_category", {"category": "Minecraft"}),
+                          ("tap_series", {"series": "Dogman"}),
+                          ("tap_starred", {"book": "b", "level": "1"})):
+        robot = _RobotWithLed({"color": {"r": 255, "g": 0, "b": 0}})  # a rating
+        await AppEventBridge(robot).dispatch(event, params)
+        last = _flatten(_submitted(robot))[-1]
+        assert (last["color"]["r"], last["color"]["g"], last["color"]["b"]) == BLUE, (
+            f"{event} left the rating colour up"
+        )

@@ -32,6 +32,7 @@ imports cleanly on machines without Blinka (``--sim``).
 
 from __future__ import annotations
 
+import colorsys
 import logging
 import math
 import os
@@ -40,6 +41,9 @@ import time
 from typing import Any, Optional
 
 log = logging.getLogger(__name__)
+
+# Temporary diagnostic switch (MAKI_LED_TRACE=1) — see _trace_near_white.
+_LED_TRACE = bool(os.environ.get("MAKI_LED_TRACE"))
 
 VALID_PIXEL_ORDERS = {"GRB", "RGB", "GRBW", "RGBW"}
 
@@ -66,7 +70,22 @@ class Anim:
 
 
 def hue_to_rgb(h: float) -> tuple[int, int, int]:
-    """Vendored ``_hue_to_rgb`` (led_ring_node.py lines 587-604)."""
+    """Vendored ``_hue_to_rgb`` (led_ring_node.py lines 587-604).
+
+    Kept byte-identical to the ROS stack's wheel: one channel held at full
+    while a second ramps, so the secondaries (yellow, cyan, magenta) put out
+    r+g+b = 510 against 255 at the primaries. That uneven output was suspected
+    of causing the rainbow's white flashes, but the ROS stack ran this exact
+    wheel and looked clean — the difference was brightness (0.03) and speed
+    (2.5 s per revolution), not the hue maths.
+
+    The one deviation is the ``h % 1.0`` wrap. Vendored, h=1.0 gives
+    int(6) % 6 = 0 with f = 6, i.e. g = 1530 — out of range and byte-truncated
+    to a near-white pixel. It is unreachable from both callers (each already
+    takes % 1.0), so the wrap changes no observable behaviour; it just stops
+    the bug being reachable at all.
+    """
+    h = h % 1.0
     i = int(h * 6) % 6
     f = h * 6 - i
     q = 1 - f
@@ -97,6 +116,42 @@ def blend_rgb(base: tuple, tint: tuple, strength: float) -> tuple[int, int, int]
         int(base[1] * (1 - s) + tint[1] * s),
         int(base[2] * (1 - s) + tint[2] * s),
     )
+
+
+def blend_hue(base: tuple, tint: tuple, strength: float) -> tuple[int, int, int]:
+    """Blend *base* toward *tint* through hue, keeping the colour saturated.
+
+    A straight RGB lerp (:func:`blend_rgb`) walks in a straight line through
+    the colour cube, and between two opposing hues that line passes through
+    the neutral axis: yellow→blue crosses (128,140,100), orange→blue crosses
+    (128,100,100). Those are grey, and a grey ring at low brightness reads as
+    a white flash — which is exactly what the crossfade was producing on every
+    colour change.
+
+    Interpolating hue (shortest way round the wheel) with saturation and value
+    lerped separately keeps every intermediate on the saturated surface, so the
+    transition sweeps through colour instead of washing out through white.
+    """
+    s = max(0.0, min(1.0, strength))
+    h1, s1, v1 = colorsys.rgb_to_hsv(*(c / 255.0 for c in base[:3]))
+    h2, s2, v2 = colorsys.rgb_to_hsv(*(c / 255.0 for c in tint[:3]))
+
+    # A fully desaturated endpoint (black/white/grey) has no meaningful hue —
+    # borrow the other end's so the blend doesn't swing through an arbitrary one.
+    if s1 <= 1e-6:
+        h1 = h2
+    if s2 <= 1e-6:
+        h2 = h1
+
+    delta = h2 - h1
+    if delta > 0.5:
+        delta -= 1.0
+    elif delta < -0.5:
+        delta += 1.0
+
+    h = (h1 + delta * s) % 1.0
+    r, g, b = colorsys.hsv_to_rgb(h, s1 + (s2 - s1) * s, v1 + (v2 - v1) * s)
+    return (int(r * 255), int(g * 255), int(b * 255))
 
 
 def sample_animation(anim: Anim, now_s: float) -> tuple[tuple, float]:
@@ -186,6 +241,9 @@ class LedRing:
                                   DEFAULT_ANIMATION_MIN_DWELL_S)))
 
         self.pixels: Any = None
+        # Last brightness pushed to the driver. Assigning `pixels.brightness`
+        # rescales the entire output buffer, so only write it when it changes.
+        self._last_brightness: Optional[float] = None
         # Last (rgb, brightness) actually clocked out — see _fill_and_show.
         self._last_frame: Optional[tuple] = None
         self._active_anim: Optional[Anim] = None
@@ -448,10 +506,46 @@ class LedRing:
             frame = (tuple(rgb_tuple), round(current_brightness, 4))
             if not force and frame == self._last_frame:
                 return
-            self.pixels.brightness = current_brightness
+            self._trace_near_white(rgb_tuple, "fill")
+            self._set_brightness_locked(current_brightness)
             self.pixels.fill(rgb_tuple)
             self.pixels.show()
             self._last_frame = frame
+
+    def _trace_near_white(self, rgb: tuple, source: str) -> None:
+        """Diagnostic (MAKI_LED_TRACE=1): log any washed-out frame, with the
+        stack of whoever wrote it.
+
+        Flags on *greyness* — how close the channels are to each other —
+        rather than on absolute level, because the ring runs at ~5% brightness
+        where a dim grey like (60,70,65) still reads as a white flash but sits
+        far below any sensible absolute threshold.
+        """
+        if not _LED_TRACE:
+            return
+        r, g, b = rgb[:3]
+        if max(r, g, b) < 12:
+            return  # essentially off; nothing visible to wash out
+        greyness = (min(r, g, b) + 1) / (max(r, g, b) + 1)
+        if greyness > 0.6:
+            log.warning(
+                "LED washed-out frame %s (greyness %.2f) from %s (brightness=%s)",
+                (r, g, b), greyness, source, self._last_brightness, stack_info=True,
+            )
+
+
+    def _set_brightness_locked(self, value: float) -> None:
+        """Assign ``pixels.brightness`` only when it actually changes.
+
+        The driver's brightness setter rescales every byte of the output
+        buffer, so writing it on every frame doubles the per-frame work of the
+        spatial rainbow for no visible effect. Caller must hold _pixel_lock.
+        """
+        rounded = round(value, 4)
+        if rounded == self._last_brightness:
+            return
+        self.pixels.brightness = value
+        self._last_brightness = rounded
 
     def _render_chase_rainbow(self, anim: Anim, now_s: float) -> None:
         """Spatial animation: each pixel gets its own hue, rotating around the
@@ -460,13 +554,15 @@ class LedRing:
             return
         offset = (now_s - anim.start) / anim.period
         with self._pixel_lock:
-            self.pixels.brightness = max(
+            self._set_brightness_locked(max(
                 self.min_brightness, min(self.max_brightness, self.brightness)
-            )
+            ))
             n = max(1, self.pixel_count)
             for i in range(n):
                 hue = ((i / n) + offset) % 1.0
-                self.pixels[i] = hue_to_rgb(hue)
+                px = hue_to_rgb(hue)
+                self._trace_near_white(px, "chase_rainbow")
+                self.pixels[i] = px
             self.pixels.show()
             # Per-pixel write: the whole-ring cache no longer describes the
             # strip, so the next fill must repaint even if its colour matches.
@@ -509,14 +605,13 @@ class LedRing:
                 # Spatial pattern — bypasses the whole-ring crossfade path
                 # below, which only knows how to blend a single RGB value.
                 self._render_chase_rainbow(active_anim_copy, now_s)
-                # 25 Hz, not 50: this is the only animation that clocks all 48
-                # pixels individually, so it is the heaviest SPI load and the
-                # most glitch-prone (corrupted frames read as white flashes).
-                # It cannot be deduplicated like a solid fill because the
-                # pattern genuinely changes every frame, so halve the rate —
-                # still smooth for a ~1.5 s revolution, half the corruption
-                # opportunities.
-                time.sleep(0.04)
+                # Full 50 Hz. This used to be throttled to 25 Hz on the theory
+                # that per-pixel writes were the heaviest SPI load and so the
+                # most likely source of the white flashes; they turned out to
+                # come from the crossfade desaturating (see blend_hue), not
+                # from the wire. At a 0.5 s revolution 25 Hz is only ~12 frames
+                # per spin, which reads as a 4-pixel-per-step stutter.
+                time.sleep(0.02)
                 continue
 
             active_rgb, active_scale = sample_animation(active_anim_copy, now_s)
@@ -531,7 +626,7 @@ class LedRing:
                     output_scale = active_scale
                 else:
                     prev_rgb, prev_scale = sample_animation(previous_anim_copy, now_s)
-                    output_rgb = blend_rgb(prev_rgb, active_rgb, transition_t)
+                    output_rgb = blend_hue(prev_rgb, active_rgb, transition_t)
                     output_scale = prev_scale + (active_scale - prev_scale) * max(
                         0.0, min(1.0, transition_t)
                     )

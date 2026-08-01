@@ -70,6 +70,13 @@ DEFAULT_SERVO_PROFILES: Dict[str, Dict[str, Any]] = {
 DEFAULT_LAYERS: Dict[str, Dict[str, Any]] = {
     "idle":       {"priority": 30,  "blend_in_time_s": 0.5,  "blend_out_time_s": 0.8, "claim_timeout_s": 5.0, "merge_targets": False},
     "expression": {"priority": 40,  "blend_in_time_s": 0.2,  "blend_out_time_s": 0.3, "claim_timeout_s": 1.5, "merge_targets": True},
+    # Sustained baseline posture (e.g. "head down at the book for as long as
+    # the book is open"). Unlike every other layer this one is re-fed on every
+    # tick by _tick_once, so its claim never goes stale and it holds
+    # indefinitely. It sits above idle so it wins at rest, and below
+    # tracking/gesture so a gesture still plays over the top and then settles
+    # back to the posture instead of snapping to neutral.
+    "posture":    {"priority": 45,  "blend_in_time_s": 0.6,  "blend_out_time_s": 0.8, "claim_timeout_s": 5.0, "merge_targets": False},
     "tracking":   {"priority": 50,  "blend_in_time_s": 0.3,  "blend_out_time_s": 0.5, "claim_timeout_s": 1.0, "merge_targets": False},
     "gesture":    {"priority": 55,  "blend_in_time_s": 0.25, "blend_out_time_s": 0.5, "claim_timeout_s": 1.0, "merge_targets": False},
     "safety":     {"priority": 100, "blend_in_time_s": 0.0,  "blend_out_time_s": 0.0, "claim_timeout_s": 5.0, "merge_targets": False},
@@ -193,6 +200,9 @@ class MotionService:
         # ── Runtime state ──────────────────────────────────────────────
         self._lock = threading.RLock()
         self._pending: List[Tuple[str, str, Dict[str, float]]] = []  # staged layer ops
+        # Sustained posture targets, re-fed every tick so the claim never
+        # expires. Empty = no posture held.
+        self._posture: Dict[str, float] = {}
         self._feedback: Dict[str, Any] = {}            # latest JointFeedback per joint
         self._feedback_positions: Dict[str, float] = {}
         self._feedback_received = False
@@ -238,6 +248,14 @@ class MotionService:
         """
         if layer not in self._layer_names:
             raise KeyError(f"unknown motion layer: {layer!r}")
+        filtered = self._filter_targets(targets)
+        if not filtered:
+            return
+        with self._lock:
+            self._pending.append(("feed", layer, filtered))
+
+    def _filter_targets(self, targets: Dict[str, float]) -> Dict[str, float]:
+        """Drop unknown joints and clamp the rest into their safe range."""
         filtered: Dict[str, float] = {}
         for name, value in targets.items():
             if name not in self._planners:
@@ -246,10 +264,41 @@ class MotionService:
             if name in joints_mod.JOINTS:
                 rad = joints_mod.clamp_rad(name, rad)
             filtered[name] = rad
+        return filtered
+
+    def set_posture(self, targets: Dict[str, float]) -> None:
+        """Hold *targets* indefinitely on the ``posture`` layer.
+
+        Every other layer has to be re-fed by its owner or its claim expires
+        and it blends out (see LayerBlender.claim_timeout_s) — that is correct
+        for momentary motion but wrong for a baseline that should persist, so
+        the tick re-feeds this one. Replaces any posture already held; call
+        :meth:`clear_posture` to let it go.
+        """
+        filtered = self._filter_targets(targets)
         if not filtered:
             return
         with self._lock:
-            self._pending.append(("feed", layer, filtered))
+            self._posture = filtered
+
+    def has_posture(self) -> bool:
+        """True while a sustained posture is held.
+
+        A posture means the client has deliberately decided where a joint
+        lives — "head down at the book until it closes". Autonomous behaviors
+        check this and stand down, because the layer priorities alone can't
+        express it: `tracking` sits ABOVE `posture` so that an explicitly
+        requested `track` still wins, which would otherwise let the
+        face-following reflex drag the head straight back off the book.
+        """
+        with self._lock:
+            return bool(self._posture)
+
+    def clear_posture(self) -> None:
+        """Release the held posture; it cosine-blends out to the layer below."""
+        with self._lock:
+            self._posture = {}
+            self._pending.append(("clear", "posture", {}))
 
     def release_layer(self, layer: str) -> None:
         """Explicitly release a layer — it cosine-blends out toward the next
@@ -392,12 +441,19 @@ class MotionService:
         self._ingest_feedback(feedback)
 
         # Consume staged layer ops (thread-safe handoff from set_layer/release)
-        pending, self._pending = self._pending, []
+        with self._lock:
+            pending, self._pending = self._pending, []
+            posture = dict(self._posture)
         for op, layer, targets in pending:
             if op == "feed":
                 self._blender.feed_layer(layer, targets, None, now)
             else:
                 self._blender.clear_layer(layer)
+
+        # Re-assert the held posture so its claim never goes stale. Done after
+        # the pending ops so a clear_posture staged this tick still wins.
+        if posture:
+            self._blender.feed_layer("posture", posture, None, now)
 
         # ── Emergency stop: freeze-and-hold ───────────────────────────
         if self._estop:

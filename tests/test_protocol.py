@@ -286,3 +286,39 @@ def test_say_contains_detection():
                                {"par": [{"kind": "say", "text": "hi"}]}]})
     assert protocol.step_contains_kind(step, "say")
     assert not protocol.step_contains_kind(parse_step({"kind": "blink"}), "say")
+
+
+# ── posture action ──────────────────────────────────────────────────────────
+
+
+def test_posture_validates_joints_like_pose():
+    a = protocol.parse_step(
+        {"kind": "posture", "joints": {"head_tilt": 1.0, "head_pan": -0.5}}
+    )
+    assert a.kind == "posture"
+    assert a.args["joints"] == {"head_tilt": 1.0, "head_pan": -0.5}
+    assert a.args["clear"] is False
+
+
+def test_posture_clear_needs_no_joints():
+    a = protocol.parse_step({"kind": "posture", "clear": True})
+    assert a.args["clear"] is True
+
+
+def test_posture_rejects_missing_joints():
+    with pytest.raises(protocol.ProtocolError) as e:
+        protocol.parse_step({"kind": "posture"})
+    assert e.value.code == protocol.E_OUT_OF_RANGE
+
+
+def test_posture_rejects_unknown_joint_and_out_of_range():
+    with pytest.raises(protocol.ProtocolError) as e:
+        protocol.parse_step({"kind": "posture", "joints": {"elbow": 0.0}})
+    assert e.value.code == protocol.E_UNKNOWN_JOINT
+    with pytest.raises(protocol.ProtocolError) as e:
+        protocol.parse_step({"kind": "posture", "joints": {"head_tilt": 5.0}})
+    assert e.value.code == protocol.E_OUT_OF_RANGE
+
+
+def test_posture_occupies_the_motion_channel():
+    assert protocol.action_channels("posture") == frozenset({protocol.Channel.MOTION})

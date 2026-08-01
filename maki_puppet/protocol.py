@@ -49,6 +49,7 @@ E_LOCKED = "locked"
 E_ESTOPPED = "estopped"
 E_QUEUE_FULL = "queue_full"
 E_TTS_UNAVAILABLE = "tts_unavailable"
+E_VISION_UNAVAILABLE = "vision_unavailable"
 E_INTERNAL = "internal"
 
 
@@ -320,6 +321,61 @@ def _validate_neutral(a: Mapping) -> dict:
     return {"duration_ms": _duration(a, "neutral", 700)}
 
 
+TRACK_TARGETS = ("face",)
+
+
+def _validate_track(a: Mapping) -> dict:
+    target = a.get("target", "face")
+    if target not in TRACK_TARGETS:
+        raise ProtocolError(
+            E_OUT_OF_RANGE,
+            f"unknown track.target '{target}'; known: {', '.join(TRACK_TARGETS)}",
+        )
+    eyes_only = a.get("eyes_only", False)
+    if not isinstance(eyes_only, bool):
+        raise ProtocolError(E_OUT_OF_RANGE, "track.eyes_only must be a boolean")
+    return {
+        "target": target,
+        "duration_ms": _duration(a, "track", 5000),
+        "eyes_only": eyes_only,
+    }
+
+
+def _validate_posture(a: Mapping) -> dict:
+    """`posture` holds a baseline pose until it is explicitly cleared.
+
+    ``{"kind": "posture", "clear": true}`` releases it; otherwise ``joints``
+    is required and is validated exactly like ``pose``.
+    """
+    if a.get("clear"):
+        return {"clear": True}
+    joints = a.get("joints")
+    if not isinstance(joints, dict) or not joints:
+        raise ProtocolError(
+            E_OUT_OF_RANGE,
+            "posture needs a non-empty 'joints' object, or 'clear': true",
+        )
+    out: dict[str, float] = {}
+    for name, value in joints.items():
+        if name not in WIRE_JOINTS:
+            raise ProtocolError(
+                E_UNKNOWN_JOINT,
+                f"unknown joint '{name}'; wire joints: {', '.join(WIRE_JOINTS)}",
+            )
+        lo, hi, _ = WIRE_JOINTS[name]
+        if not _is_number(value):
+            raise ProtocolError(
+                E_OUT_OF_RANGE, f"posture.joints.{name} must be a number"
+            )
+        v = float(value)
+        if not (lo <= v <= hi):
+            raise ProtocolError(
+                E_OUT_OF_RANGE, f"posture.joints.{name}={v} outside [{lo}, {hi}]"
+            )
+        out[name] = v
+    return {"joints": out, "clear": False}
+
+
 # kind -> (channels, validator).  `wait` occupies no channel by itself (§6).
 _ACTION_TABLE: dict[str, tuple[frozenset, Any]] = {
     "blink": (frozenset({Channel.MOTION}), lambda a, an, ge: _validate_blink(a)),
@@ -332,6 +388,8 @@ _ACTION_TABLE: dict[str, tuple[frozenset, Any]] = {
     "say": (frozenset({Channel.VOICE}), lambda a, an, ge: _validate_say(a)),
     "wait": (frozenset(), lambda a, an, ge: _validate_wait(a)),
     "neutral": (frozenset({Channel.MOTION}), lambda a, an, ge: _validate_neutral(a)),
+    "posture": (frozenset({Channel.MOTION}), lambda a, an, ge: _validate_posture(a)),
+    "track": (frozenset({Channel.MOTION}), lambda a, an, ge: _validate_track(a)),
 }
 
 ACTION_KINDS = tuple(_ACTION_TABLE)

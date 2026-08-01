@@ -104,6 +104,22 @@ led:
   lock_file: /tmp/maki_led_spi.lock
   animations_file: animations.yaml   # relative to this config dir
   default_animation: steady_blue
+  # Matches the vendored ROS stack's shipped value (maki_led_defaults.yaml
+  # led_ring_node: default_brightness 0.03). This file previously left it
+  # unset, which silently fell back to the code default of 0.05 — 67% brighter
+  # than the stack this was ported from.
+  default_brightness: 0.03
+  # No crossfade between colours — switch instantly.
+  #
+  # Any interpolation between two saturated colours passes through something
+  # that is not either of them: a straight RGB lerp crosses the neutral axis
+  # (green->blue hits grey), and interpolating hue instead crosses the bright
+  # part of the wheel (green->red peaks at (193,227,0), ~60% brighter than
+  # either end). At the ring's ~5% brightness both read as a white flash, which
+  # is what made the rating colours flash on every change except green->green.
+  # A 0.25 s fade buys nothing on a colour swap that is meant to read as a
+  # discrete signal anyway.
+  animation_transition_s: 0.0
 
 motion:
   rate_hz: 50
@@ -117,6 +133,12 @@ motion:
   layers:
     idle:       {priority: 30,  blend_in_time_s: 0.5,  blend_out_time_s: 0.8, claim_timeout_s: 5.0}
     expression: {priority: 40,  blend_in_time_s: 0.2,  blend_out_time_s: 0.3, claim_timeout_s: 1.5, merge_targets: true}
+    # Sustained baseline pose from the `posture` action (e.g. head down for as
+    # long as a book is open). Re-fed every tick by the motion service, so
+    # unlike the others its claim never expires and it holds indefinitely.
+    # Above idle so it wins at rest; below gesture so gestures play over it and
+    # then settle back to it instead of to neutral.
+    posture:    {priority: 45,  blend_in_time_s: 0.6,  blend_out_time_s: 0.8, claim_timeout_s: 5.0}
     tracking:   {priority: 50,  blend_in_time_s: 0.3,  blend_out_time_s: 0.5, claim_timeout_s: 1.0}
     gesture:    {priority: 55,  blend_in_time_s: 0.25, blend_out_time_s: 0.5, claim_timeout_s: 1.0}
     safety:     {priority: 100, blend_in_time_s: 0.0,  blend_out_time_s: 0.0, claim_timeout_s: 5.0}
@@ -261,6 +283,137 @@ motion:
         amplitude_deg: 0.15  # subtler sway (~0.003 rad)
         frequency_hz: 0.08   # slower than breathing (~12.5 s cycle)
 
+# Face tracking. Ported from the ROS maki_vision face_tracker_node; drives the
+# `tracking` motion layer (priority 50) via the `track` action.
+#
+# Values below are the ROBOT'S DEPLOYED TUNING, taken from the ROS stack's
+# maki_face_tracker.yaml / maki_camera.yaml — not the node's declared parameter
+# defaults, which differ and were never what actually ran. Change them against
+# the real robot, not from first principles.
+#
+# Starts with the gateway. If the camera is missing or fails to open, startup
+# logs the failure and continues without it; `track` then rejects with
+# vision_unavailable and state.health.vision reports "down".
+vision:
+  enabled: true
+
+  camera:
+    # Arducam IMX219 on the reference robot.
+    device: /dev/video0       # V4L2 path, or an integer index
+    width: 640
+    height: 480
+    fps: 30
+    # The reference camera is mounted inverted — without this the tracker
+    # reads every bearing upside down and drives the head the wrong way.
+    flip_vertical: true
+    # Set true only if the camera also mirrors left/right.
+    flip_horizontal: false
+
+  # How long a detection stays current. Bridges the occasional dropped frame
+  # without letting the head chase someone who has already left.
+  lost_timeout_s: 0.5
+
+  # Autonomous face following: MAKI looks at whoever is in front of it, with no
+  # client involvement. Armed once the wake sequence finishes.
+  #
+  # It stands down entirely while any client performance is running, so a
+  # client `track` act never fights it. Otherwise arbitration is the layer
+  # blender's job — tracking (50) overrides idle (30) but yields to gesture
+  # (55), so a deliberate `look` wins and tracking resumes when it ends.
+  auto_track:
+    enabled: true
+    # Keep holding the last targets this long after the face goes, then hand
+    # the joints back. Long enough to ride out dropped detections and someone
+    # glancing away; short enough not to stare at an empty chair.
+    release_after_s: 2.0
+    # true = follow with the eyes only and never turn the head.
+    eyes_only: false
+
+  # Detect on every Nth captured frame. Detection dominates CPU; the control
+  # loop is capped at 20 Hz regardless, so at 30 fps this costs nothing.
+  process_every_n_frames: 2
+
+  detector:
+    # yunet (DNN, accurate) | haar (bundled with OpenCV, weaker, no model file).
+    # --sim ignores this and uses the scripted sim detector.
+    face_detector: yunet
+    # Empty = use the vendored models/face_detection_yunet_2023mar.onnx.
+    yunet_model_path: ""
+    yunet_score_threshold: 0.6
+    yunet_nms_threshold: 0.3
+    yunet_top_k: 5
+    # Detect on a downscaled frame — ~6x cheaper at 0.4 and still resolves a
+    # face at conversational distance.
+    detection_scale: 0.4
+    # Haar-only knobs.
+    face_scale_factor: 1.15
+    face_min_neighbors: 3
+    face_min_size_px: 20
+
+  tracking:
+    # Camera FOV — this is what converts pixel offsets into body-centric
+    # angles. Wrong values make the head consistently over- or under-shoot,
+    # and no amount of gain tuning compensates.
+    #
+    # MEASURED on this robot (Arducam IMX179, 640x480) with
+    # scripts/calibrate_fov.py: focal length 525 px -> 62.7 / 49.1 deg. Kept at
+    # 62.0 / 49.0, which is inside the measurement spread. Re-run that tool if
+    # the camera or its resolution ever changes; the ROS config these came from
+    # described an IMX219, which is NOT the sensor fitted here.
+    camera_hfov_deg: 62.0
+    camera_vfov_deg: 49.0
+
+    # HEAD: only re-anchors once the face's bearing has drifted past
+    # head_reanchor_threshold_rad for anchor_hold_frames in a row. Lowering
+    # the threshold tracks more tightly but fidgets more; raising it leaves
+    # more work to the eyes, which reads as calmer.
+    head_reanchor_threshold_rad: 0.08
+    anchor_hold_frames: 2
+    head_pan_hold_threshold_rad: 0.008
+    head_hold_frames: 1
+    head_settle_time_s: 0.10
+    head_settle_min_delta_rad: 0.008
+
+    # EYES: proportional on pixel error, with engage/release hysteresis so
+    # they don't buzz at the deadband edge.
+    kp_eye_pan: 0.65
+    kp_eye_tilt: 0.5
+    deadband: 0.09
+    eye_only_error_threshold: 0.03
+    eye_release_error_threshold: 0.015
+    tracking_mode_eye_clamp_rad: 0.20
+    center_mode_eye_clamp_rad: 0.14
+
+    # VOR: eyes counter-rotate by the head's remaining travel so gaze stays
+    # locked on the face while the head swings. 0.0 disables it, and the eyes
+    # then visibly drag behind every head move.
+    eye_lead_strength: 0.35
+
+    # MotionService's S-curve planner owns acceleration limiting, so the
+    # tracker publishes raw targets. Setting this false re-enables the ROS
+    # node's internal step limiter, which adds ~300 ms of latency on top.
+    use_planner_smoothing: true
+
+    # Only used when use_planner_smoothing is false.
+    eye_recenter_feedforward: 0.85
+    max_step_rad: 0.025
+    max_step_head_fast_rad: 0.04
+    max_step_head_large_error_rad: 0.07
+    max_step_eye_rad: 0.06
+    max_step_eye_fast_rad: 0.14
+
+    # Micro-saccades: small eye drift while the face is stable, so a locked
+    # gaze doesn't read as a dead stare. Gated off the moment the face moves.
+    enable_eye_saccades: true
+    saccade_error_threshold: 0.06
+    saccade_speed_threshold: 0.7
+    saccade_amplitude_rad: 0.04
+    saccade_period_s: 0.35
+    saccade_tilt_fraction: 0.6
+
+    face_smoothing_alpha: 0.24   # EMA on the face centre; 0 disables
+    control_min_dt_s: 0.05       # 20 Hz control ceiling
+
 idle:
   delay_s: 5.0
   led_animation: steady_blue
@@ -278,13 +431,12 @@ idle:
 # vendored `nod`/`lean_forward` gestures and the `sleepy` keyframes).
 boot:
   startup:
-    # chase_rainbow spins the pattern around the ring; rainbow_swirl cycles the
-    # whole ring through one hue at a time, which reads as a pulse, not a spin.
-    led_animation: chase_rainbow      # rotating rainbow while it wakes
+    # Not chase_rainbow: it rewrites all 48 pixels 50x a second, which is what
+    # makes servo-bus noise visible as white flashes (docs/LED_NOISE.md).
+    led_animation: boot_pulse         # slow blue-cyan pulse while it wakes
     head_tilt: 0.0                    # head level
     eyelids: 1.0                      # eyes open
-    # Exactly one rainbow revolution: matches chase_rainbow's `period` in
-    # animations.yaml. Raising this spins it more than once.
+    # How long the wake pose is held before clients are accepted.
     duration_s: 1.5
   shutdown:
     led_animation: sleep_deep_breathe # slow blue-purple sleep glow

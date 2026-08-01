@@ -9,6 +9,9 @@ cancellation-safe: they only await ``ctx.sleep`` and feed motion layers via
 Motion layer usage:
   * ``expression`` — blink / eyelids / mouth (merge_targets layer)
   * ``gesture``    — look / pose / gesture keyframes / neutral
+  * ``tracking``   — track (priority 50, below gesture: a deliberate gesture
+    outranks face-following, which is what you want when an act says "look
+    left" while someone is standing to the right)
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from typing import Any, Awaitable, Callable, Dict, FrozenSet, Iterable, List, Tu
 from .. import protocol
 from ..motion import joints as joints_mod
 from ..protocol import Action, Channel, Par, ProtocolError, Seq, Step
+from ..vision.tracker import FaceTracker
 from .context import ActionContext
 
 log = logging.getLogger(__name__)
@@ -31,6 +35,10 @@ GESTURE_TICK_S = 0.05  # ~20 Hz
 
 # How far ahead of the head the eyes are commanded in a `look` (eyes lead).
 LOOK_EYES_LEAD_S = 0.08
+
+# Face-tracking control rate. Matches the ROS node's control_min_dt_s (0.05):
+# ticking faster only burns cycles, since the tracker rejects them anyway.
+TRACK_TICK_S = 0.05  # 20 Hz
 
 
 def _wire_to_rad(joints: Dict[str, float]) -> Dict[str, float]:
@@ -200,6 +208,53 @@ async def run_neutral(ctx: ActionContext, args: dict) -> None:
     ctx.motion.release_layer("gesture")
 
 
+async def run_posture(ctx: ActionContext, args: dict) -> None:
+    """Install (or clear) the sustained baseline posture.
+
+    Deliberately bypasses ``ctx.set_motion_layer``: that records the layer in
+    ``touched_layers`` so the engine releases it when the performance ends,
+    which is exactly what a posture must NOT do — it outlives the act that set
+    it and persists until something clears it.
+    """
+    if args["clear"]:
+        ctx.motion.clear_posture()
+        return
+    ctx.motion.set_posture(_wire_to_rad(args["joints"]))
+
+
+async def run_track(ctx: ActionContext, args: dict) -> None:
+    """Follow a face for ``duration_ms``, feeding the ``tracking`` layer.
+
+    Runs the ported control law at ``TRACK_TICK_S`` against whatever
+    VisionService has most recently seen. Frames where no face is current
+    (either none detected, or the detection has aged past the service's
+    ``lost_timeout_s``) simply hold the last targets — the layer's own
+    claim_timeout is what eventually hands the joints back to idle, so a
+    person stepping out of frame produces a graceful drift home rather than a
+    snap.
+
+    Errors, rather than silently doing nothing, when no camera is wired up:
+    an act that asked to track and got a still robot is a bug worth surfacing.
+    """
+    if ctx.vision is None:
+        raise ProtocolError(
+            protocol.E_VISION_UNAVAILABLE,
+            "face tracking unavailable (no vision service)",
+        )
+    tracker = FaceTracker(ctx.tracker_config, clock=ctx.clock)
+    eyes_only = args["eyes_only"]
+    deadline = ctx.clock() + args["duration_ms"] / 1000.0
+    while True:
+        now = ctx.clock()
+        if now >= deadline:
+            return
+        face = ctx.vision.latest_face(now)
+        output = tracker.update(face, ctx.motion.pose_rad(), now)
+        if output is not None:
+            ctx.set_motion_layer("tracking", output.as_targets(eyes_only=eyes_only))
+        await ctx.sleep(min(TRACK_TICK_S, deadline - now))
+
+
 Runner = Callable[[ActionContext, dict], Awaitable[None]]
 
 
@@ -231,6 +286,8 @@ ACTIONS: Dict[str, ActionSpec] = {
         _spec("say", run_say),
         _spec("wait", run_wait),
         _spec("neutral", run_neutral),
+        _spec("posture", run_posture),
+        _spec("track", run_track),
     )
 }
 

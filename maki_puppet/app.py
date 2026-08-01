@@ -19,11 +19,12 @@ import yaml
 from .bridge import AppEventBridge, RobotAPI
 from .choreography import Choreographer
 from .engine import ActionEngine
-from .hw import LedRing, ServoBus, SimLedRing, SimServoBus
+from .hw import Camera, LedRing, ServoBus, SimCamera, SimLedRing, SimServoBus
 from .idle import IdleBehavior
 from .motion import MotionService
 from .motion import joints as joints_mod
 from .server import GatewayServer
+from .vision import FaceTrackingBehavior, TrackerConfig, VisionService
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +79,26 @@ class PuppetApp:
             self.bus = ServoBus(servo_cfg)
             self.led = LedRing(led_cfg, animations_doc)
 
+        # ── Vision ─────────────────────────────────────────────────────
+        # Optional: absent or `enabled: false` leaves self.vision None, and
+        # the `track` action then rejects with vision_unavailable rather than
+        # pretending to follow a face.
+        vision_cfg = dict(cfg.get("vision") or {})
+        self.vision: Optional[Any] = None
+        self.tracker_config = TrackerConfig.from_mapping(vision_cfg.get("tracking"))
+        if vision_cfg.get("enabled", False):
+            camera_cfg = dict(vision_cfg.get("camera") or {})
+            camera = SimCamera(camera_cfg) if self.sim else Camera(camera_cfg)
+            self.vision = VisionService(
+                camera,
+                vision_cfg,
+                sim=self.sim,
+                # Closed-loop sim: the scripted face is positioned relative to
+                # where the head actually is, so tracking converges in --sim
+                # the way it does on the robot.
+                pose_provider=lambda: self.motion.pose_rad(),
+            )
+
         # ── Motion / choreography / engine / idle / server ─────────────
         motion_cfg = cfg.get("motion") or {}
         self.motion = MotionService(self.bus, motion_cfg)
@@ -87,12 +108,23 @@ class PuppetApp:
             self.motion,
             self.led,
             get_gesture=self.choreographer.get_gesture,
+            vision=self.vision,
+            tracker_config=self.tracker_config,
             alarm_animation=ESTOP_ALARM_ANIMATION,
             default_animation=str(led_cfg.get("default_animation", "breathing_cyan")),
         )
         self.idle = IdleBehavior(self.engine, self.motion, self.led, cfg.get("idle") or {})
+        # Autonomous face following. Armed after the wake sequence so MAKI
+        # looks at whoever is in front of it without being asked.
+        self.face_tracking = FaceTrackingBehavior(
+            self.engine,
+            self.motion,
+            self.vision,
+            self.tracker_config,
+            vision_cfg.get("auto_track") or {},
+        )
         self.bridge = AppEventBridge(
-            RobotAPI(self.engine, self.choreographer, animation_names)
+            RobotAPI(self.engine, self.choreographer, animation_names, self.led)
         )
         self.server = GatewayServer(
             cfg.get("server") or {},
@@ -101,6 +133,14 @@ class PuppetApp:
             led=self.led,
             choreographer=self.choreographer,
             animations=animation_names,
+            # `vision` is advertised in `welcome.capabilities` only when a
+            # camera is actually configured, so a client can tell before it
+            # sends a `track` act.
+            capabilities=(
+                ("motion", "mouth", "led", "vision")
+                if self.vision is not None
+                else ("motion", "mouth", "led")
+            ),
             sim=self.sim,
             motion_rate_hz=float(motion_cfg.get("rate_hz", 50.0)),
             bridge=self.bridge,
@@ -164,12 +204,24 @@ class PuppetApp:
         self.bus.open()
         self.led.start()
         self.motion.start()
+        if self.vision is not None:
+            # Never fatal: a missing or busy camera must not stop the gateway
+            # coming up. `track` then rejects with vision_unavailable.
+            try:
+                self.vision.start()
+            except Exception:
+                log.exception("vision service failed to start; tracking disabled")
+                self.vision = None
+                self.engine.vision = None
         # Wake up before accepting clients, so the first connection sees a
         # robot that is already upright and looking at them.
         await self._run_boot_sequence("startup")
         await self.server.start()
         self.choreographer.start_watch()
         self.idle.start()
+        # After the wake sequence: MAKI is upright with its eyes open, so this
+        # is the moment it should start looking around for someone.
+        self.face_tracking.start()
         self._started = True
         log.info(
             "maki_puppet up (%s) on ws://%s:%d/ws",
@@ -179,11 +231,19 @@ class PuppetApp:
         )
 
     async def stop(self) -> None:
-        """Orderly shutdown: idle → engine → server → motion → led → bus."""
+        """Orderly shutdown: idle → vision → engine → server → motion → led → bus."""
         if not self._started:
             return
         self._started = False
         self.idle.stop()
+        self.face_tracking.stop()
+        if self.vision is not None:
+            # Stop seeing before we stop moving, so no track performance picks
+            # up a fresh face while the engine is being torn down.
+            try:
+                self.vision.stop()
+            except Exception:
+                log.exception("vision stop failed")
         self.choreographer.stop_watch()
         try:
             await self.engine.stop_all()

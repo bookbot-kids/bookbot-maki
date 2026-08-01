@@ -25,12 +25,27 @@ OVERRIDES = {
     # Skip the wake/sleep flourishes: they would add ~4.5 s to every fixture.
     # Covered explicitly in test_boot_sequences.py.
     "boot": {"startup": {"duration_s": 0.0}, "shutdown": {"duration_s": 0.0}},
+    # Vision ships enabled, but most tests here don't want a capture thread
+    # running; `vision_app` opts back in for the ones that do.
+    "vision": {"enabled": False},
 }
 
 
 @pytest.fixture
 async def app():
     app = PuppetApp(CONFIG, sim=True, config_overrides=OVERRIDES)
+    await app.start()
+    yield app
+    await app.stop()
+
+
+@pytest.fixture
+async def vision_app():
+    """The same stack with the sim camera enabled, so `track` is available."""
+    app = PuppetApp(
+        CONFIG, sim=True,
+        config_overrides={**OVERRIDES, "vision": {"enabled": True}},
+    )
     await app.start()
     yield app
     await app.stop()
@@ -227,6 +242,47 @@ async def test_act_say_rejected_tts_unavailable(app):
     assert len(acks) == 1
     assert acks[0]["code"] == "tts_unavailable"
     await c.ws.close()
+
+
+async def test_act_track_rejected_when_no_camera_is_configured(app):
+    c = await connect(app)
+    await c.hello()
+    ref = await c.send("act", {"do": {"kind": "track", "duration_ms": 500}})
+    acks = await c.acks_until_terminal(ref)
+    assert len(acks) == 1
+    assert acks[0]["code"] == "vision_unavailable"
+    await c.ws.close()
+
+
+async def test_vision_capability_is_advertised_only_with_a_camera(app, vision_app):
+    plain = await connect(app)
+    assert "vision" not in (await plain.hello())["payload"]["capabilities"]
+    await plain.ws.close()
+
+    seeing = await connect(vision_app)
+    assert "vision" in (await seeing.hello())["payload"]["capabilities"]
+    await seeing.ws.close()
+
+
+async def test_act_track_runs_against_the_sim_camera(vision_app):
+    c = await connect(vision_app)
+    await c.hello()
+    ref = await c.send("act", {"do": {"kind": "track", "duration_ms": 400}})
+    acks = await c.acks_until_terminal(ref)
+    assert [a["status"] for a in acks] == ["accepted", "started", "completed"]
+    await c.ws.close()
+
+
+async def test_state_reports_vision_health(app, vision_app):
+    plain = await connect(app)
+    await plain.hello()
+    assert (await plain.state_get())["health"]["vision"] == "off"
+    await plain.ws.close()
+
+    seeing = await connect(vision_app)
+    await seeing.hello()
+    assert (await seeing.state_get())["health"]["vision"] == "sim"
+    await seeing.ws.close()
 
 
 async def test_act_unknown_animation(app):

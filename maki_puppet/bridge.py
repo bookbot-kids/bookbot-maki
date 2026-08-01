@@ -7,7 +7,7 @@ event named below to the matching ``on_<event>`` method here — one method per
 event, exactly like a ``MethodCallHandler`` switching on ``call.method``.
 
 Each handler drives the robot through ``self.robot`` (a :class:`RobotAPI`).
-The reaction vocabulary (colours, rainbow, head positions) is defined as
+The reaction vocabulary (colours, flourish, head positions) is defined as
 module constants below, so retuning the feel means editing one place:
 
     async def on_celebrate_example(self, word: str | None) -> None:
@@ -55,18 +55,16 @@ ORANGE = (255, 120, 0)     # incorrect (deliberately not red — a miss while
 RED = (255, 0, 0)
 YELLOW = (255, 200, 0)
 
-# Spatial rotating rainbow (vs `rainbow_swirl`, which cycles the whole ring
-# through one hue at a time and does not read as "rotating").
-RAINBOW = "chase_rainbow"
-# One full revolution of `chase_rainbow`, i.e. its `period` in
-# config/animations.yaml. Rainbows are one-shot: they spin exactly once and
-# then settle, rather than spinning forever until some later event.
-RAINBOW_MS = 1500
+# Tap flourish: three static colours in sequence, then back to whatever the
+# ring was showing. Replaces the spinning rainbow — see docs/LED_NOISE.md. The
+# rainbow rewrote all 48 pixels 50x a second, which is what made servo-bus
+# noise visible as white flashes; this is four SPI writes in total.
+FLOURISH_COLORS = (RED, YELLOW, GREEN)
+FLOURISH_STEP_MS = 200     # dwell per colour
 
 RATING_COLORS = {1: RED, 2: ORANGE, 3: YELLOW, 4: GREEN, 5: BLUE}
 
 FEEDBACK_HOLD_MS = 2000    # correct/incorrect colour dwell
-RATING_FLASH_MS = 1000     # book-rating colour dwell
 
 # Normalized head targets (positive tilt = DOWN — see PROTOCOL.md §3).
 HEAD_DOWN = 1.0            # looking at the book
@@ -94,11 +92,23 @@ class RobotAPI:
     """
 
     def __init__(self, engine: ActionEngine, choreographer: Choreographer,
-                 animations: Sequence[str]) -> None:
+                 animations: Sequence[str], led: Any = None) -> None:
         self._engine = engine
         self._choreo = choreographer
         self._animations = list(animations)
+        self._led = led
         self._ids = itertools.count(1)
+
+    def led_state(self) -> Optional[dict]:
+        """The ring's current colour/animation, as an ``led`` step's args.
+
+        Returns ``{"color": {...}}`` or ``{"animation": name}`` — whichever the
+        ring is showing right now — or None if no ring is attached. Used to
+        capture a state worth returning to after a transient flourish.
+        """
+        if self._led is None:
+            return None
+        return self._led.current
 
     # ── Core ───────────────────────────────────────────────────────────
 
@@ -241,17 +251,57 @@ class AppEventBridge:
             self._color(then),
         ))
 
-    def _rainbow_then(self, rgb: Tuple[int, int, int]) -> None:
-        """Spin the rainbow exactly once, then settle on *rgb*."""
-        self.robot.act(seq(
-            {"kind": "led", "animation": RAINBOW},
-            {"kind": "wait", "duration_ms": RAINBOW_MS},
-            self._color(rgb),
-        ))
+    def _restore_led(
+        self, fallback: Tuple[int, int, int] = BLUE
+    ) -> dict:
+        """An `led` step returning the ring to whatever it shows right now.
+
+        Captured at submit time, before the flourish starts, so a transient
+        effect hands the ring back exactly as it found it instead of forcing
+        one hardcoded colour. Falls back to *fallback* when there is no ring
+        (sim/tests) or its state is unreadable.
+        """
+        state = self.robot.led_state()
+        if isinstance(state, dict):
+            if "animation" in state:
+                return {"kind": "led", "animation": state["animation"]}
+            color = state.get("color")
+            if isinstance(color, dict) and {"r", "g", "b"} <= set(color):
+                return {"kind": "led", "color": dict(color)}
+        return self._color(fallback)
+
+    def _flourish_steps(self, then: Optional[dict] = None) -> list:
+        """The tap flourish: red, yellow, green, then *then*.
+
+        Defaults to returning the ring to whatever it was showing before the
+        flourish started. Replaces the old spinning rainbow, which needed the
+        ring rewritten 50x a second and so was the animation that showed the
+        servo-bus noise most clearly (docs/LED_NOISE.md). This is three static
+        colours instead — four SPI writes in total rather than ~125.
+        """
+        steps: list = []
+        for rgb in FLOURISH_COLORS:
+            steps.append(self._color(rgb))
+            steps.append({"kind": "wait", "duration_ms": FLOURISH_STEP_MS})
+        steps.append(then if then is not None else self._restore_led())
+        return steps
+
+    def _flourish_then(self, rgb: Optional[Tuple[int, int, int]] = None) -> None:
+        """Play the flourish once, then settle.
+
+        With no argument the ring returns to its pre-flourish state; pass *rgb*
+        to force a specific settle colour instead.
+        """
+        then = None if rgb is None else self._color(rgb)
+        self.robot.act(seq(*self._flourish_steps(then)))
 
     def _browsing(self) -> None:
-        """Library browsing: one rainbow revolution, back to resting blue."""
-        self._rainbow_then(BLUE)
+        """Library/home browsing: the flourish, then resting blue.
+
+        Deliberately settles on BLUE rather than restoring the previous colour:
+        leaving a book for the library is what clears a held rating colour.
+        """
+        self._flourish_then(BLUE)
 
     # ── Handlers: one per app event ────────────────────────────────────
 
@@ -269,14 +319,18 @@ class AppEventBridge:
 
     async def on_tap_book(self, book: Optional[str],
                           level: Optional[str]) -> None:
-        """A book was opened: rainbow, and look down at the book."""
+        """A book was opened: the flourish, and settle looking down at the book.
+
+        The head-down pose is a `posture`, not a `pose`: a pose lives on the
+        gesture layer, whose claim expires ~1 s after it is set, so the head
+        would drift back up on its own. A posture is held until close_book
+        clears it, and gestures (nod, wiggle, page-turn glances) play over the
+        top and settle back down to the book rather than to level.
+        """
         self.robot.act(par(
-            seq({"kind": "led", "animation": RAINBOW},
-                {"kind": "wait", "duration_ms": RAINBOW_MS},
-                self._color(BLUE)),
-            {"kind": "pose",
-             "joints": {"head_pan": 0.0, "head_tilt": HEAD_DOWN},
-             "duration_ms": 900},
+            seq(*self._flourish_steps()),
+            {"kind": "posture",
+             "joints": {"head_pan": 0.0, "head_tilt": HEAD_DOWN}},
         ))
 
     async def on_tap_starred(self, book: Optional[str],
@@ -286,12 +340,20 @@ class AppEventBridge:
 
     async def on_close_book(self, book: Optional[str],
                             level: Optional[str]) -> None:
-        """Book closed: back to blue, head level again."""
+        """Book closed: back to blue, head level again.
+
+        Releases the head-down posture set by on_tap_book, then drives the head
+        up explicitly — clearing the posture alone would only blend back to
+        whatever idle happens to want.
+        """
         self.robot.act(par(
             self._color(BLUE),
-            {"kind": "pose",
-             "joints": {"head_pan": 0.0, "head_tilt": HEAD_LEVEL},
-             "duration_ms": 900},
+            seq(
+                {"kind": "posture", "clear": True},
+                {"kind": "pose",
+                 "joints": {"head_pan": 0.0, "head_tilt": HEAD_LEVEL},
+                 "duration_ms": 900},
+            ),
         ))
 
     async def on_practice_correct(self, word: Optional[str]) -> None:
@@ -323,15 +385,21 @@ class AppEventBridge:
         self.robot.led_color(*BLUE)
 
     async def on_tap_page(self, page: Optional[int]) -> None:
-        """A page was tapped/turned: one rainbow revolution, back to listening."""
-        self._rainbow_then(WHITE)
+        """A page was tapped/turned: the flourish, back to how it was."""
+        self._flourish_then()
 
     async def on_book_rate(self, rating: Optional[int]) -> None:
-        """The child rated the book 1-5: flash that rating's colour, then green."""
+        """The child rated the book 1-5: show that rating's colour and hold it.
+
+        The colour stays until something else claims the ring — a different
+        rating, or navigating back out to the library/home screen (which the
+        browsing handlers settle to BLUE). It is a standing indicator of the
+        rating just given, not a momentary flash.
+        """
         if rating is None:
             return
         rgb = RATING_COLORS.get(int(rating))
         if rgb is None:
             log.warning("book_rate: rating %r outside 1-5, ignoring", rating)
             return
-        self._hold_then(rgb, RATING_FLASH_MS, GREEN)
+        self.robot.led_color(*rgb)

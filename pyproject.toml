@@ -20,6 +20,13 @@ robot = [
     "adafruit-circuitpython-neopixel-spi",
     "adafruit-blinka",
 ]
+# Face tracking (config `vision.enabled`). Separate from `robot` because the
+# gateway runs fine without a camera — and because on the Pi you may prefer the
+# system python3-opencv package to the ~90 MB pip wheel.
+# FaceDetectorYN (the `yunet` backend) needs OpenCV >= 4.5.4.
+vision = [
+    "opencv-python>=4.5.4",
+]
 dev = [
     "pytest>=7",
     "pytest-asyncio>=0.23",

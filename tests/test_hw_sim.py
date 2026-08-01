@@ -337,3 +337,81 @@ def test_chase_rainbow_invalidates_the_cache():
     ring._render_chase_rainbow(Anim("chase_rainbow", (0, 0, 0), 1.0), 0.0)
     ring._fill_and_show((0, 80, 200), 1.0)     # same colour as before the chase
     assert ring.pixels.shows > before + 1, "static repaint was wrongly skipped"
+
+
+def test_blend_hue_endpoints():
+    from maki_puppet.hw.led_ring import blend_hue
+
+    assert blend_hue((255, 0, 0), (0, 0, 255), 0.0) == (255, 0, 0)
+    assert blend_hue((255, 0, 0), (0, 0, 255), 1.0) == (0, 0, 255)
+
+
+def test_crossfade_never_desaturates_through_white():
+    """The white-flash regression: a linear RGB crossfade between opposing
+    hues passes through neutral grey, which on a dim ring reads as a white
+    flash. Interpolating hue keeps every intermediate coloured."""
+    import itertools
+
+    from maki_puppet.bridge import GREEN, RATING_COLORS
+    from maki_puppet.hw.led_ring import blend_hue
+
+    for a, b in itertools.permutations(list(RATING_COLORS.values()) + [GREEN], 2):
+        for k in range(1, 25):
+            r, g, bl = blend_hue(a, b, k / 25)
+            # Grey/white means all three channels are close together.
+            greyness = (min(r, g, bl) + 1) / (max(r, g, bl) + 1)
+            assert greyness < 0.6, (
+                f"{a}->{b} at t={k/25:.2f} washed out to {(r, g, bl)}"
+            )
+
+
+def test_blend_hue_handles_greyscale_endpoints():
+    """Black/white have no hue; blending must not swing through a random one."""
+    from maki_puppet.hw.led_ring import blend_hue
+
+    # Fading a colour down to black stays on that colour's hue.
+    r, g, b = blend_hue((0, 0, 255), (0, 0, 0), 0.5)
+    assert b > r and b > g
+    # And the reverse direction likewise.
+    r, g, b = blend_hue((0, 0, 0), (255, 0, 0), 0.5)
+    assert r > g and r > b
+
+
+def test_no_crossfade_means_no_intermediate_colour():
+    """The rating-flash regression: with animation_transition_s = 0 a colour
+    change must land on the new colour directly, never on an interpolated
+    intermediate (which is always brighter or greyer than both endpoints)."""
+    import threading
+    import time as _time
+
+    from maki_puppet.bridge import GREEN, RATING_COLORS
+    from maki_puppet.hw.led_ring import LedRing
+
+    class Recording(_FakePixels):
+        def __init__(self):
+            super().__init__()
+            self.frames = []
+
+        def show(self):
+            super().show()
+            self.frames.append(self._px[0])
+
+    ring = LedRing({"pixel_count": 48, "animation_transition_s": 0.0},
+                   {"animations": {}})
+    ring.pixels = Recording()
+    t = threading.Thread(target=ring._anim_loop, daemon=True)
+    t.start()
+    try:
+        ring.set_color(*GREEN)
+        _time.sleep(0.15)
+        ring.pixels.frames.clear()
+        for rgb in RATING_COLORS.values():
+            ring.set_color(*rgb)
+            _time.sleep(0.15)
+        seen = {tuple(f) for f in ring.pixels.frames}
+    finally:
+        ring._is_shutting_down = True
+        t.join(timeout=1.0)
+
+    allowed = {tuple(c) for c in RATING_COLORS.values()} | {tuple(GREEN)}
+    assert seen <= allowed, f"interpolated colours leaked through: {seen - allowed}"

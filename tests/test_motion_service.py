@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from maki_puppet.motion import joints as joints_mod
 from maki_puppet.motion.service import MotionService
 
 
@@ -357,3 +358,70 @@ def test_breathing_offsets_settled_joint_only():
     # Amplitude bounded by the configured 2 degrees
     assert max(settled) < center + 1.1 * amp
     assert min(settled) > center - 1.1 * amp
+
+
+# ── Sustained posture ─────────────────────────────────────────────────
+
+
+def test_posture_holds_indefinitely_without_refeed():
+    """The whole point of the posture layer: unlike every other layer, its
+    claim must never expire, so a held pose does not drift away on its own."""
+    bus = FakeBus()
+    svc = MotionService(bus, make_config())
+    d = Driver(svc)
+    svc.set_posture({"head_tilt": 0.3})
+    # Far longer than any claim_timeout in the config (max 5 s).
+    d.run(600)
+    assert bus.writes[-1]["head_tilt"] == pytest.approx(0.3, abs=0.03)
+
+
+def test_posture_outlasts_an_expiring_gesture_and_head_returns_to_it():
+    """A gesture plays over the posture, then settles back down to it rather
+    than to neutral — the 'head stays down while the book is open' case."""
+    bus = FakeBus()
+    svc = MotionService(bus, make_config())
+    d = Driver(svc)
+    svc.set_posture({"head_tilt": 0.3})
+    d.run(100)
+    assert bus.writes[-1]["head_tilt"] == pytest.approx(0.3, abs=0.03)
+
+    # Gesture (priority 55) beats posture (45) while it is being fed.
+    d.run(100, refeed=[("gesture", {"head_tilt": -0.3}, 10)])
+    assert bus.writes[-1]["head_tilt"] == pytest.approx(-0.3, abs=0.03)
+
+    # Stop feeding it: the claim expires and we fall back to the posture.
+    d.run(300)
+    assert bus.writes[-1]["head_tilt"] == pytest.approx(0.3, abs=0.03)
+
+
+def test_posture_beats_idle_but_loses_to_gesture():
+    bus = FakeBus()
+    svc = MotionService(bus, make_config())
+    d = Driver(svc)
+    svc.set_posture({"head_tilt": 0.3})
+    d.run(200, refeed=[("idle", {"head_tilt": -0.25}, 20)])
+    assert bus.writes[-1]["head_tilt"] == pytest.approx(0.3, abs=0.03)
+
+
+def test_clear_posture_releases_back_to_idle():
+    bus = FakeBus()
+    svc = MotionService(bus, make_config())
+    d = Driver(svc)
+    svc.set_posture({"head_tilt": 0.3})
+    d.run(150, refeed=[("idle", {"head_tilt": -0.25}, 20)])
+    assert bus.writes[-1]["head_tilt"] == pytest.approx(0.3, abs=0.03)
+
+    svc.clear_posture()
+    d.run(300, refeed=[("idle", {"head_tilt": -0.25}, 20)])
+    assert bus.writes[-1]["head_tilt"] == pytest.approx(-0.25, abs=0.03)
+
+
+def test_set_posture_clamps_and_ignores_unknown_joints():
+    bus = FakeBus()
+    svc = MotionService(bus, make_config())
+    d = Driver(svc)
+    svc.set_posture({"head_tilt": 99.0, "not_a_joint": 0.5})
+    d.run(200)
+    lo, hi = joints_mod.JOINTS["head_tilt"].rad_min, joints_mod.JOINTS["head_tilt"].rad_max
+    assert lo <= bus.writes[-1]["head_tilt"] <= hi
+    assert "not_a_joint" not in bus.writes[-1]

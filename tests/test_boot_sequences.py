@@ -21,6 +21,9 @@ pytestmark = pytest.mark.asyncio
 BOOT = {
     "server": {"host": "127.0.0.1", "port": 0},
     "idle": {"delay_s": 300},
+    # These tests assert on the boot pose; a tracking layer feeding the head
+    # would be a second author of the joints they measure.
+    "vision": {"enabled": False},
     "boot": {
         "startup": {
             "led_animation": "chase_rainbow",

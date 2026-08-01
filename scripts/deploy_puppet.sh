@@ -18,7 +18,11 @@ if [[ -z "$ROBOT" ]]; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTE_DIR="maki_puppet"
+# Must match the checkout the robot's boot script pulls and runs
+# (start_bookbot_linux.sh: BOOKBOT_MAKI_DIR, default ~/bookbot-maki). Deploying
+# somewhere else creates a second tree that boot-time `git pull` never touches
+# and that nothing executes — which is exactly what ~/maki_puppet had become.
+REMOTE_DIR="${ROBOT_PUPPET_DIR:-bookbot-maki}"
 REMOTE_VENV="${ROBOT_VENV:-\$HOME/lux_robot_venv}"
 
 echo "Syncing $REPO_ROOT -> $ROBOT:~/$REMOTE_DIR"
@@ -32,7 +36,7 @@ rsync -avz --delete \
   "$REPO_ROOT/" "$ROBOT:~/$REMOTE_DIR/"
 
 echo "Installing into the robot venv..."
-ssh "$ROBOT" ROBOT_VENV="$REMOTE_VENV" bash -s <<'REMOTE'
+ssh "$ROBOT" ROBOT_VENV="$REMOTE_VENV" REMOTE_DIR="$REMOTE_DIR" bash -s <<'REMOTE'
 set -euo pipefail
 
 VENV="$(eval echo "${ROBOT_VENV:-$HOME/lux_robot_venv}")"
@@ -48,7 +52,7 @@ fi
 set +u
 source "$VENV/bin/activate"
 set -u
-pip install -e "$HOME/maki_puppet[robot]"
+pip install -e "$HOME/${REMOTE_DIR:-bookbot-maki}[robot]"
 
 # Stop any previously running puppet so the next start picks up this deploy
 # (its atexit/SIGTERM handler torques servos off and releases the locks).
@@ -60,7 +64,7 @@ cat <<EOF
 Deployed. Next steps on the robot:
 
   ssh $ROBOT
-  ~/maki_puppet/scripts/run_puppet.sh
+  ~/$REMOTE_DIR/scripts/run_puppet.sh
 
 Make sure no other stack is driving the servos — anything holding
 /tmp/maki_servo_ttyUSB0.lock makes the second process exit immediately.

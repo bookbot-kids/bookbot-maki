@@ -13,6 +13,9 @@ class ActionContext:
     """Everything an action needs to touch the robot.
 
     ``motion``/``led`` follow the pinned MotionService/LedRing interfaces.
+    ``vision`` is the VisionService (or None when no camera is configured —
+    the `track` action rejects rather than silently standing still), and
+    ``tracker_config`` is the tuning it builds each FaceTracker from.
     ``get_gesture(name)`` returns choreography keyframes (raises KeyError).
     ``claim_layer`` is the engine's layer-ownership hook: it records which
     performance most recently fed a motion layer so a superseded performance
@@ -23,6 +26,8 @@ class ActionContext:
 
     motion: Any
     led: Any
+    vision: Optional[Any] = None
+    tracker_config: Optional[Any] = None
     get_gesture: Callable[[str], list] = lambda name: (_ for _ in ()).throw(KeyError(name))
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], Any] = asyncio.sleep

@@ -336,6 +336,16 @@ class GatewayServer:
             raise ProtocolError(
                 protocol.E_TTS_UNAVAILABLE, "tts is not in this build's capabilities"
             )
+        # Same shape as the tts gate: reject the whole act up front rather than
+        # letting a `track` step fail partway through a performance that has
+        # already started moving the robot.
+        if "vision" not in self._capabilities and protocol.step_contains_kind(
+            act.step, "track"
+        ):
+            raise ProtocolError(
+                protocol.E_VISION_UNAVAILABLE,
+                "face tracking is not in this build's capabilities",
+            )
         perf = Performance(
             id=env.id,
             client=conn,
@@ -457,9 +467,24 @@ class GatewayServer:
             "health": {
                 "servo": "sim" if self._sim else "up",
                 "led": "sim" if self._sim else "up",
+                "vision": self._vision_health(),
                 "loop_hz": self._motion_rate_hz,
             },
         }
+
+    def _vision_health(self) -> str:
+        """"off" when no camera is configured, "sim" / "up" / "down" otherwise.
+
+        "down" means vision was configured but its thread is not running — a
+        camera that failed to open or died — which is worth surfacing rather
+        than reporting as simply absent.
+        """
+        vision = getattr(self._engine, "vision", None)
+        if vision is None:
+            return "off"
+        if not vision.running:
+            return "down"
+        return "sim" if self._sim else "up"
 
     def _wire_pose(self) -> dict:
         pose_rad = self._motion.pose_rad()

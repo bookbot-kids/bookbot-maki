@@ -91,6 +91,12 @@ rather than one `act` per sample.
 `"tts"` and any act containing a `say` action is rejected with `tts_unavailable`
 (§6, §8.2). The channel is reserved so the protocol does not change when TTS lands.
 
+Face tracking is **not** a channel. `track` (§6) is an ordinary `motion` action, so it
+arbitrates against gestures exactly like any other — vision is an *input* to motion,
+not a parallel output. It is gated by the `"vision"` capability rather than by a
+channel; without a camera, acts containing `track` are rejected with
+`vision_unavailable`.
+
 ---
 
 ## 2. Transport
@@ -235,8 +241,10 @@ mirrored 1:1 in `tests/fixtures/`.
 }}
 ```
 
-- `capabilities`: subset of `["motion", "mouth", "led", "tts"]`. **Current builds exclude
-  `"tts"`** (§1.3). Feature-detect the viseme stream by checking for `"mouth"`.
+- `capabilities`: subset of `["motion", "mouth", "led", "tts", "vision"]`. **Current
+  builds exclude `"tts"`** (§1.3). `"vision"` is present only when a camera is
+  configured and running — feature-detect face tracking by checking for it, and the
+  viseme stream by checking for `"mouth"`.
 - `animations` / `gestures` / `events`: the live catalogs. `events` is the union of
   choreography names and `ignored_events` from `choreographies.yaml` — i.e. every name
   the server will accept without `unknown_event`. (In the catalog above,
@@ -453,7 +461,7 @@ reply to `state.get` (then with `ref`). Full field reference in §11.
     "lock": { "held_by": null, "scopes": [] },
     "clients": [ { "name": "bookbot-flutter", "kind": "flutter" },
                  { "name": "reading-brain", "kind": "python" } ],
-    "health": { "servo": "up", "led": "up", "loop_hz": 49.9 }
+    "health": { "servo": "up", "led": "up", "vision": "up", "loop_hz": 49.9 }
 }}
 ```
 
@@ -516,6 +524,59 @@ arguments are ignored.
 | `say` | tts | `text` (required) | **Deferred.** While `"tts"` is absent from `welcome.capabilities`, any wire act containing `say` is rejected whole with `tts_unavailable`. (§1.3; choreography-side `say` steps are instead skipped at runtime — §10.5.) |
 | `wait` | — | `duration_ms` (required, 0–60000) | Pause. Occupies no channel by itself; inside a composed act it simply delays within the act's existing channel claim. |
 | `neutral` | motion | `duration_ms` (700) | Return all joints to the neutral pose. |
+| `posture` | motion | either `joints` (map of wire joints → normalized values) or `clear: true` | Hold a **sustained** baseline pose until it is explicitly cleared. Same joint validation as `pose`. Completes immediately — it installs the posture rather than waiting on it, so it takes no `duration_ms`. |
+| `track` | motion | `target` (`"face"`); `duration_ms` (5000); `eyes_only` (false) | Follow a detected face for `duration_ms` — head and eyes together, or `eyes_only:true` for eyes alone. Requires `"vision"` in `welcome.capabilities`; otherwise the whole act is rejected with `vision_unavailable`. Unknown `target` → `out_of_range`. |
+
+### `track`
+
+`track` is the one action whose motion is driven by what the robot *sees* rather than by
+its arguments. It runs a closed loop at 20 Hz on the `tracking` motion layer: the head
+re-orients only once the face's bearing has drifted past a threshold and stayed there,
+while the eyes take the residual continuously and counter-rotate to hold gaze fixed
+while the head swings.
+
+```jsonc
+{"kind": "track", "duration_ms": 8000}                    // follow me for 8 s
+{"kind": "track", "duration_ms": 3000, "eyes_only": true} // just the eyes
+```
+
+Two consequences worth designing around:
+
+- **It is bounded, not a mode.** `duration_ms` caps at 60000 like every other action.
+  To track continuously, re-issue it; to stop early, `cancel` the act.
+- **`tracking` sits below `gesture`.** A deliberate `look`/`gesture`/`pose` running
+  concurrently outranks face-following, which is what you want when an act says "look
+  at the book" while someone is standing off to the side. When the gesture ends,
+  tracking resumes.
+
+If the face is lost mid-action, `track` holds its last targets rather than snapping
+anywhere; the `tracking` layer's own claim timeout then blends the joints back to the
+layer below. The act still completes normally at `duration_ms` — a lost face is not an
+error.
+
+### `pose` vs `posture`
+
+`pose` is momentary and `posture` is sustained; the difference is not cosmetic.
+
+A `pose` is fed to the `gesture` motion layer, whose claim expires ~1 s after the last
+update (§ layer config). Once it lapses the layer blends out and the joints drift back
+to whatever the layer below wants — so a `pose` **cannot** hold a position beyond its
+own act. That is correct for a glance or a lean, and wrong for "look down at the book
+for as long as the book is open".
+
+A `posture` is re-asserted by the motion service on every tick, so its claim never goes
+stale and it holds indefinitely. It sits above `idle` and below `tracking`/`gesture`, so
+gestures still play over the top and then settle **back to the posture** instead of to
+neutral. It survives the act that created it, and is released only by
+`{"kind": "posture", "clear": true}`.
+
+```jsonc
+{"kind": "posture", "joints": {"head_tilt": 1.0}}  // head down, and it stays down
+{"kind": "posture", "clear": true}                 // release; blends to the layer below
+```
+
+Clearing a posture only lets the head fall back to the layer below — it does not command
+a new position. To go somewhere specific afterwards, clear and then `pose`.
 
 General argument rules:
 
@@ -598,6 +659,7 @@ Guarantees:
 | `estopped` | E-stop engaged; `act`/`event` rejected (§9.4). |
 | `queue_full` | The per-channel queue is at capacity (16). |
 | `tts_unavailable` | Act contains `say` while `"tts"` is not in capabilities. |
+| `vision_unavailable` | Act contains `track` while `"vision"` is not in capabilities (no camera configured, or it failed to start). |
 | `internal` | Unexpected server error; `detail` has a hint, server logs have the trace. |
 
 Clients must tolerate error codes not in this table (treat as `internal`; §13).
@@ -804,7 +866,7 @@ Informative — the normative list is `welcome.animations` at runtime.
 | `breathing_white` | breathing | 150,150,150 | 5.0 | |
 | `thinking_pulse_blue` | breathing | 0,100,255 | 3.0 | "Thinking" |
 | `rainbow_swirl` | rainbow | — | 5.0 | Playful |
-| `chase_rainbow` | chase_rainbow | — | 2.5 | Spatial rainbow chase |
+| `chase_rainbow` | chase_rainbow | — | 0.5 | Spatial rainbow chase; `period` is exactly one revolution |
 | `attentive_green` | breathing | 0,180,0 | 3.0 | |
 | `observing_white` | breathing | 255,255,255 | 3.5 | |
 | `sleeping_dim_blue` | breathing | 0,0,60 | 8.0 | Sleep |
