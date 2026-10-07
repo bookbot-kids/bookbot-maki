@@ -62,10 +62,16 @@ DEFAULT_ANIMATION = "breathing_cyan"
 class Anim:
     """Container for a running animation (vendored ``_Anim``)."""
 
-    def __init__(self, name: str, rgb: tuple, period: float):
+    def __init__(self, name: str, rgb: tuple, period: float,
+                 brightness_scale: float = 1.0):
         self.name = name
         self.rgb = tuple(rgb)
         self.period = max(0.1, float(period))
+        # Multiplier on the ring's base brightness for this animation only
+        # (animations.yaml `brightness_scale`). Still clamped to
+        # max_brightness, so it can lift one signal above the rest without
+        # ever exceeding the ring's hard cap.
+        self.brightness_scale = max(0.0, float(brightness_scale))
         self.start = time.time()
 
 
@@ -390,7 +396,8 @@ class LedRing:
         anim_type = details.get("type", "static")
         color = tuple(details.get("color", [0, 0, 0]))
         period = float(details.get("period", 2.0))
-        if self._request_animation(Anim(anim_type, color, period)):
+        brightness_scale = float(details.get("brightness_scale", 1.0))
+        if self._request_animation(Anim(anim_type, color, period, brightness_scale)):
             log.info(
                 "Animation requested: %s with %s P:%ss", anim_type, color, period
             )
@@ -435,6 +442,7 @@ class LedRing:
             left.name == right.name
             and left.rgb == right.rgb
             and abs(left.period - right.period) < 1e-6
+            and abs(left.brightness_scale - right.brightness_scale) < 1e-6
         )
 
     def _commit_animation_locked(self, anim: Anim, now_s: float) -> bool:
@@ -523,6 +531,9 @@ class LedRing:
         """
         if not _LED_TRACE:
             return
+        active = self._active_anim
+        if active is not None and active.name == "static" and tuple(rgb[:3]) == active.rgb:
+            return  # the exact colour asked for (e.g. the neutral white), not a wash-out
         r, g, b = rgb[:3]
         if max(r, g, b) < 12:
             return  # essentially off; nothing visible to wash out
@@ -555,7 +566,8 @@ class LedRing:
         offset = (now_s - anim.start) / anim.period
         with self._pixel_lock:
             self._set_brightness_locked(max(
-                self.min_brightness, min(self.max_brightness, self.brightness)
+                self.min_brightness,
+                min(self.max_brightness, self.brightness * anim.brightness_scale),
             ))
             n = max(1, self.pixel_count)
             for i in range(n):
@@ -624,19 +636,30 @@ class LedRing:
                         self._transition_started_at = 0.0
                     output_rgb = active_rgb
                     output_scale = active_scale
+                    output_gain = active_anim_copy.brightness_scale
                 else:
                     prev_rgb, prev_scale = sample_animation(previous_anim_copy, now_s)
                     output_rgb = blend_hue(prev_rgb, active_rgb, transition_t)
-                    output_scale = prev_scale + (active_scale - prev_scale) * max(
-                        0.0, min(1.0, transition_t)
-                    )
+                    mix = max(0.0, min(1.0, transition_t))
+                    output_scale = prev_scale + (active_scale - prev_scale) * mix
+                    prev_gain = previous_anim_copy.brightness_scale
+                    output_gain = prev_gain + (
+                        active_anim_copy.brightness_scale - prev_gain
+                    ) * mix
             else:
                 output_rgb = active_rgb
                 output_scale = active_scale
+                output_gain = active_anim_copy.brightness_scale
 
             # Clamp scale to [animation_brightness_floor, 1.0] before applying
-            # the cap. This keeps LEDs within 15-90% of base brightness.
+            # the cap. This keeps LEDs within 15-90% of base brightness. The
+            # per-animation brightness_scale applies after the clamp, so it is
+            # the one way to go above that; _fill_and_show still caps the
+            # result at max_brightness.
             clamped_scale = max(self.animation_brightness_floor, min(1.0, output_scale))
-            self._fill_and_show(output_rgb, clamped_scale * self.animation_brightness_cap)
+            self._fill_and_show(
+                output_rgb,
+                clamped_scale * self.animation_brightness_cap * output_gain,
+            )
 
             time.sleep(0.02)

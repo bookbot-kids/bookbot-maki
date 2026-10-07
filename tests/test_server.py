@@ -181,8 +181,9 @@ async def test_event_celebrate_drives_leds(app):
     acks = await c.acks_until_terminal(ref, timeout=15.0)
     assert acks[-1]["status"] == "completed"
     assert acks[0]["channels"] == ["motion", "led"]
-    # choreography ends by restoring the resting animation
-    assert app.led.current == {"animation": app.config["led"]["default_animation"]}
+    # celebrate happens mid-reading, so it stays on the reading blue (green
+    # is reserved for the book end)
+    assert app.led.current == {"animation": "steady_blue"}
     await c.ws.close()
 
 

@@ -113,7 +113,11 @@ class PuppetApp:
             alarm_animation=ESTOP_ALARM_ANIMATION,
             default_animation=str(led_cfg.get("default_animation", "breathing_cyan")),
         )
-        self.idle = IdleBehavior(self.engine, self.motion, self.led, cfg.get("idle") or {})
+        self.idle = IdleBehavior(
+            self.engine, self.motion, self.led, cfg.get("idle") or {},
+            # Late-bound: the bridge is built below, and tests swap it out.
+            led_hold=lambda: self.bridge.holds_ring,
+        )
         # Autonomous face following. Armed after the wake sequence so MAKI
         # looks at whoever is in front of it without being asked.
         self.face_tracking = FaceTrackingBehavior(

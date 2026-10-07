@@ -71,17 +71,17 @@ without any app change.
 
 | Event | Send it when… | Params | What MAKI physically does (today) |
 |---|---|---|---|
-| `reading_started` | A reading session begins (book opened, first page shown). | — | Wakes up: warm orange light pulse, perks its head up, looks at the reader, blinks. |
+| `reading_started` | A reading session begins (book opened, first page shown). | — | Wakes up: reading blue, perks its head up, looks at the reader, blinks. |
 | `page_turned` | The reader turns to a new page. | — | Glances down toward the book, blinks, settles back to neutral. |
 | `word_read` | The child reads a word correctly. **High-frequency — always fire-and-forget (§4.2).** | `word` (string, optional — for logging/observers) | A quick blink. Deliberately tiny; if MAKI is busy, the event is silently dropped so per-word events can never lag the robot. |
-| `word_struggled` | The child hesitates or gets a word wrong. | `word` (string, optional) | Leans in with a curious head tilt, cool blue-teal light. Deliberately warm — curiosity, not judgement. |
+| `word_struggled` | The child hesitates or gets a word wrong. | `word` (string, optional) | Leans in with a curious head tilt, purple light. Deliberately warm — curiosity, not judgement. |
 | `sentence_read` | A full sentence completed. | — | **Nothing yet** (accepted, reserved for future choreography). Safe to send now. |
-| `celebrate` | Page/chapter finished, streak achieved, goal met. | — | Big happy reaction: rainbow sweep + double head wiggle, then settles to its calm cyan breathing. |
-| `encourage` | The child needs a nudge to keep going. | — | Warm amber pulse + a nod. |
-| `attention` | The child looked away / app wants eyes back on the book. | — | Rainbow sweep + an energetic wake-up motion. |
-| `reading_finished` | Session ends normally. | — | Proud double nod under a gold glow, then settles to idle. |
-| `sleep` | App going to background / long pause. | — | Eyes droop, dim blue slow breathing. |
-| `wake` | Returning from `sleep`. | — | Perks up, back to cyan breathing. |
+| `celebrate` | Page/chapter finished, streak achieved, goal met. | — | Happy double head wiggle under the reading blue. |
+| `encourage` | The child needs a nudge to keep going. | — | A nod. |
+| `attention` | The child looked away / app wants eyes back on the book. | — | An energetic wake-up motion. |
+| `reading_finished` | Session ends normally. | — | Proud double nod under the book-end green, which stays on. |
+| `sleep` | App going to background / long pause. | — | Eyes droop, dim white slow breathing. |
+| `wake` | Returning from `sleep`. | — | Perks up, back to the resting white. |
 
 Notes:
 
@@ -128,7 +128,7 @@ client library consumes those for you.
 Alongside the choreographed events above, the gateway accepts **app events**: raw
 Bookbot UI moments. These route to Python code (`maki_puppet/bridge.py`,
 class `AppEventBridge`) instead of `choreographies.yaml` — one `on_<event>` handler
-per event, platform-channel style. **All 15 are implemented** — sending them
+per event, platform-channel style. **All 21 are implemented** — sending them
 produces real robot behaviour today (see the table below and PROTOCOL.md §10.2b).
 Retuning that behaviour means editing `bridge.py`; the app never changes.
 
@@ -163,14 +163,31 @@ events.bookRate(5);
 | `mute` | `mute()` | — |
 | `tap_page` | `tapPage(page)` | `page` (int) |
 | `book_rate` | `bookRate(rating)` | `rating` (int, 1–5) |
+| `show_library` | `showLibrary()` | — |
+| `practice_start` | `practiceStart(book:)` | `book` (string) |
+| `page_start` | `pageStart(page)` | `page` (int) |
+| `reading_word_incorrect` | `readingWordIncorrect(word:)` | `word` (string) |
+| `page_end` | `pageEnd(page, errors:)` | `page` (int), `errors` (int) |
+| `book_end` | `bookEnd(book:, level:)` | `book`, `level` (strings) |
 
-What they do: `tap_book` plays the tap flourish (red/yellow/green, 200 ms each)
-and pins MAKI's head down at the page until `close_book`; `book_rate` shows that
-rating's colour and **holds** it until another rating or until you navigate back
-to the library; `tap_page` flourishes and returns the ring to the colour it had;
-the correct/incorrect events flash green/orange for 2 s then return to the
-listening colour; `listen` turns the ring white. Colour vocabulary: blue =
-resting, white = listening, green = correct, orange = incorrect.
+The last six are new and **not yet in `maki_bridge.dart`** — add them there with
+exactly these names and params. When to send each:
+
+- `show_library` — whenever the library screen appears, including the return from a finished book.
+- `practice_start` — when the practice-words phase begins, before the first word.
+- `page_start` — when the child begins reading a page.
+- `reading_word_incorrect` — the moment a word turns purple on screen while reading.
+- `page_end` — when the child finishes the page, while it is still on screen; `errors` = words flagged on it.
+- `book_end` — when the last page is finished, before the rating screen.
+
+What they do: the ring follows the session — neutral white in the library and on
+book open, continuous purple through the practice words, blue while reading,
+purple **immediately** for a flagged word (back to blue after 2 s), purple at a page
+end with errors, and a brighter green from `book_end` (and `book_rate`) until
+`show_library`. A correct word never changes the colour. MAKI follows the child's
+face throughout and glances down only at `page_start` and at an error-free
+`page_end`. Full table: PROTOCOL.md §10.2b. Colour vocabulary: white = library,
+blue = reading, purple = needs practice, green = book end only.
 
 Semantics: a handler acks `completed` (detail `"bridge"`). A handler that raises returns an `error` ack
 with code `internal`; the app should treat that as non-fatal (log and move on).

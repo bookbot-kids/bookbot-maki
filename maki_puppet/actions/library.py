@@ -101,7 +101,12 @@ async def run_look(ctx: ActionContext, args: dict) -> None:
         return
     lead = min(LOOK_EYES_LEAD_S, total)
     await ctx.sleep(lead)
+    # Re-send the eye targets with the head's: `gesture` is not a merge layer,
+    # so each feed replaces the last wholesale, and a head-only feed would
+    # drop the eyes back to whatever layer sits below (tracking/idle) 80 ms
+    # into the look.
     ctx.set_motion_layer("gesture", {
+        **eye_targets,
         "head_pan": joints_mod.norm_to_rad("head_pan", args["pan"]),
         "head_tilt": joints_mod.norm_to_rad("head_tilt", args["tilt"]),
     })

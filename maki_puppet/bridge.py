@@ -7,18 +7,18 @@ event named below to the matching ``on_<event>`` method here — one method per
 event, exactly like a ``MethodCallHandler`` switching on ``call.method``.
 
 Each handler drives the robot through ``self.robot`` (a :class:`RobotAPI`).
-The reaction vocabulary (colours, flourish, head positions) is defined as
+The reaction vocabulary (colours, glance, session phases) is defined as
 module constants below, so retuning the feel means editing one place:
 
     async def on_celebrate_example(self, word: str | None) -> None:
         self.robot.gesture("happy_wiggle", repeat=2)
-        self.robot.led("attention_sweep")
+        self.robot.led("steady_blue")
         # or an existing choreography from choreographies.yaml:
         self.robot.play("celebrate")
         # or a composed step (wire Step grammar, PROTOCOL.md §10):
         self.robot.act(seq(
             par({"kind": "gesture", "name": "nod"},
-                {"kind": "led", "animation": "warm_pulse"}),
+                {"kind": "led", "animation": "steady_purple"}),
             {"kind": "neutral"},
         ), priority="high", on_busy="replace")
 
@@ -47,28 +47,37 @@ log = logging.getLogger(__name__)
 # ── Reaction vocabulary ─────────────────────────────────────────────────────
 # Colours are wire RGB 0-255; the LED ring scales them by its own brightness
 # caps, so these are hues rather than absolute intensities.
-BLUE = (0, 80, 200)        # resting / not reading — matches `steady_blue`
-WHITE = (255, 255, 255)    # actively listening to the child read
-GREEN = (0, 200, 60)       # correct
-ORANGE = (255, 120, 0)     # incorrect (deliberately not red — a miss while
-                           # learning to read should not read as an error)
-RED = (255, 0, 0)
-YELLOW = (255, 200, 0)
+#
+# The palette is deliberately tiny (the product colour scheme): a neutral for
+# browsing, blue for reading, purple for "needs practice", and green for the
+# end of a book only. No red, orange or yellow anywhere in the reading flow,
+# and no multi-colour flourishes — a colour on the ring always means one thing.
+NEUTRAL = (150, 150, 150)  # library / book selection — matches `steady_white`
+BLUE = (0, 80, 200)        # reading — matches `steady_blue`
+PURPLE = (150, 0, 255)     # a word needs practice; the practice-words phase
+BOOK_END_ANIMATION = "book_end_green"  # green, brighter than the rest; book end only
 
-# Tap flourish: three static colours in sequence, then back to whatever the
-# ring was showing. Replaces the spinning rainbow — see docs/LED_NOISE.md. The
-# rainbow rewrote all 48 pixels 50x a second, which is what made servo-bus
-# noise visible as white flashes; this is four SPI writes in total.
-FLOURISH_COLORS = (RED, YELLOW, GREEN)
-FLOURISH_STEP_MS = 200     # dwell per colour
+FLAG_HOLD_MS = 2000        # purple dwell for a word flagged while reading
 
-RATING_COLORS = {1: RED, 2: ORANGE, 3: YELLOW, 4: GREEN, 5: BLUE}
-
-FEEDBACK_HOLD_MS = 2000    # correct/incorrect colour dwell
-
-# Normalized head targets (positive tilt = DOWN — see PROTOCOL.md §3).
+# Normalized look target (positive tilt = DOWN — see PROTOCOL.md §3). A `look`
+# drives head AND eyes from the same tilt, so 1.0 puts both at the bottom of
+# their safe range: head tick 2300, eyes tick 2200 (~13 deg).
 HEAD_DOWN = 1.0            # looking at the book
-HEAD_LEVEL = 0.0           # looking at the child
+
+# A down-glance at the page. Chained short looks rather than one long one: the
+# gesture layer's claim expires 1.0 s after its last update, so a single long
+# look would drift back up halfway through; 600 ms steps keep a wide margin. When the act ends the layer blends
+# out and face tracking takes the head back to the child.
+GLANCE_MS = (600, 600, 600)
+GLANCE_TAG = "glance"
+
+# Where the app is in a session. Each phase owns one standing ring colour.
+LIBRARY = "library"        # profile select, library, series — NEUTRAL
+BOOK = "book"              # book opened, nothing read yet — NEUTRAL
+PRACTICE = "practice"      # practice words before reading — PURPLE
+READING = "reading"        # reading pages — BLUE (purple per flagged word)
+PAGE_END = "page_end"      # page finished — PURPLE if it had errors, else BLUE
+BOOK_END = "book_end"      # last page done, rating screen — green
 
 
 def seq(*steps: Any) -> dict:
@@ -181,6 +190,10 @@ class RobotAPI:
         """Cancel every queued and running performance (incl. other clients')."""
         return self._engine.cancel("all")
 
+    def cancel_tag(self, tag: str) -> int:
+        """Cancel the queued/running performances submitted with *tag*."""
+        return self._engine.cancel(f"tag:{tag}")
+
 
 class AppEventBridge:
     """One ``on_<event>`` handler per Bookbot app event. Fill in the blanks.
@@ -188,6 +201,11 @@ class AppEventBridge:
     ``EVENT_PARAMS`` is the wire contract shared with lib/maki_bridge.dart:
     for each event, the ordered param keys the Flutter side sends. Params
     arrive as keyword arguments; a param the app omitted arrives as None.
+
+    The bridge tracks which phase of a session the app is in (``phase``) and
+    gives each phase one standing ring colour. Events that do not move the
+    session to a new phase leave the ring alone, so a correct word, a mute or a
+    repeated ``listen`` can never flash a colour or cut a purple signal short.
     """
 
     EVENT_PARAMS: Dict[str, Tuple[str, ...]] = {
@@ -197,6 +215,8 @@ class AppEventBridge:
         "tap_book": ("book", "level"),
         "tap_starred": ("book", "level"),
         "close_book": ("book", "level"),
+        "show_library": (),
+        "practice_start": ("book",),
         "practice_correct": ("word",),
         "practice_incorrect": ("word",),
         "focus_word_correct": ("word",),
@@ -205,11 +225,30 @@ class AppEventBridge:
         "listen": (),
         "mute": (),
         "tap_page": ("page",),
+        "page_start": ("page",),
+        "reading_word_incorrect": ("word",),
+        "page_end": ("page", "errors"),
+        "book_end": ("book", "level"),
         "book_rate": ("rating",),
     }
 
     def __init__(self, robot: RobotAPI) -> None:
         self.robot = robot
+        # The ring boots on led.default_animation (steady_white), which is
+        # the LIBRARY colour, so the two start in agreement.
+        self.phase = LIBRARY
+        # Words flagged on the current page; the fallback when page_end
+        # arrives without an `errors` count.
+        self.page_errors = 0
+
+    @property
+    def holds_ring(self) -> bool:
+        """True while a session colour is up (anything but the library).
+
+        IdleBehavior checks this before switching the ring to its resting
+        light, so idle re-arming can never wipe a held colour mid-book.
+        """
+        return self.phase != LIBRARY
 
     # ── Dispatch plumbing (no need to touch) ───────────────────────────
 
@@ -235,171 +274,223 @@ class AppEventBridge:
         r, g, b = rgb
         return {"kind": "led", "color": {"r": r, "g": g, "b": b}}
 
-    def _hold_then(
-        self, rgb: Tuple[int, int, int], hold_ms: int,
-        then: Tuple[int, int, int],
-    ) -> None:
-        """Show *rgb* for *hold_ms*, then settle on *then*.
+    def _phase_led(self) -> dict:
+        """The `led` step for the current phase's standing colour."""
+        if self.phase == BOOK_END:
+            return {"kind": "led", "animation": BOOK_END_ANIMATION}
+        if self.phase == PRACTICE:
+            return self._color(PURPLE)
+        if self.phase == READING:
+            return self._color(BLUE)
+        if self.phase == PAGE_END:
+            return self._color(PURPLE if self.page_errors else BLUE)
+        return self._color(NEUTRAL)
 
-        Submitted as ONE act so the revert is part of the same performance:
-        if a newer event replaces this one mid-hold, the stale revert is
-        cancelled with it instead of stomping the new colour a second later.
+    def _enter(self, phase: str) -> None:
+        """Move to *phase* and show its colour.
+
+        Always submits, even when the phase is unchanged: the new act replaces
+        whatever the LED channel is running, including a pending revert.
         """
+        self.phase = phase
+        self.robot.act(self._phase_led())
+
+    def _glance_down(self) -> None:
+        """Glance down at the page, then let face tracking take the head back.
+
+        Motion-only and tagged, so it never touches the ring and a practice
+        word or a mistake can cancel it (see _look_at_child).
+        """
+        self.robot.act(
+            seq(*({"kind": "look", "pan": 0.0, "tilt": HEAD_DOWN,
+                   "duration_ms": ms} for ms in GLANCE_MS)),
+            tag=GLANCE_TAG,
+        )
+
+    def _look_at_child(self) -> None:
+        """Cut any running glance short so the head goes back to the child.
+
+        Practice words and mistakes must be met looking at the child, never
+        at the page. Cancelling releases the gesture layer, and face tracking
+        (which runs whenever nothing outranks it) takes over again.
+        """
+        self.robot.cancel_tag(GLANCE_TAG)
+
+    def _flag_word(self) -> None:
+        """A word needs practice mid-reading: purple now, then back to blue.
+
+        One act, so the revert belongs to the same performance: if the next
+        event replaces it mid-hold, the stale revert is cancelled with it
+        instead of stomping the new colour.
+        """
+        self.page_errors += 1
+        self.phase = READING
+        self._look_at_child()
         self.robot.act(seq(
-            self._color(rgb),
-            {"kind": "wait", "duration_ms": hold_ms},
-            self._color(then),
+            self._color(PURPLE),
+            {"kind": "wait", "duration_ms": FLAG_HOLD_MS},
+            self._color(BLUE),
         ))
 
-    def _restore_led(
-        self, fallback: Tuple[int, int, int] = BLUE
-    ) -> dict:
-        """An `led` step returning the ring to whatever it shows right now.
-
-        Captured at submit time, before the flourish starts, so a transient
-        effect hands the ring back exactly as it found it instead of forcing
-        one hardcoded colour. Falls back to *fallback* when there is no ring
-        (sim/tests) or its state is unreadable.
-        """
-        state = self.robot.led_state()
-        if isinstance(state, dict):
-            if "animation" in state:
-                return {"kind": "led", "animation": state["animation"]}
-            color = state.get("color")
-            if isinstance(color, dict) and {"r", "g", "b"} <= set(color):
-                return {"kind": "led", "color": dict(color)}
-        return self._color(fallback)
-
-    def _flourish_steps(self, then: Optional[dict] = None) -> list:
-        """The tap flourish: red, yellow, green, then *then*.
-
-        Defaults to returning the ring to whatever it was showing before the
-        flourish started. Replaces the old spinning rainbow, which needed the
-        ring rewritten 50x a second and so was the animation that showed the
-        servo-bus noise most clearly (docs/LED_NOISE.md). This is three static
-        colours instead — four SPI writes in total rather than ~125.
-        """
-        steps: list = []
-        for rgb in FLOURISH_COLORS:
-            steps.append(self._color(rgb))
-            steps.append({"kind": "wait", "duration_ms": FLOURISH_STEP_MS})
-        steps.append(then if then is not None else self._restore_led())
-        return steps
-
-    def _flourish_then(self, rgb: Optional[Tuple[int, int, int]] = None) -> None:
-        """Play the flourish once, then settle.
-
-        With no argument the ring returns to its pre-flourish state; pass *rgb*
-        to force a specific settle colour instead.
-        """
-        then = None if rgb is None else self._color(rgb)
-        self.robot.act(seq(*self._flourish_steps(then)))
-
-    def _browsing(self) -> None:
-        """Library/home browsing: the flourish, then resting blue.
-
-        Deliberately settles on BLUE rather than restoring the previous colour:
-        leaving a book for the library is what clears a held rating colour.
-        """
-        self._flourish_then(BLUE)
+    def _practice(self) -> None:
+        """Practice words: purple throughout, eyes on the child."""
+        self._look_at_child()
+        if self.phase != PRACTICE:
+            self._enter(PRACTICE)
 
     # ── Handlers: one per app event ────────────────────────────────────
 
+    # Library / browsing — neutral light.
+
     async def on_tap_profile(self, profile: Optional[str]) -> None:
         """A profile was tapped on the profile-select screen."""
-        self._browsing()
+        self._enter(LIBRARY)
 
     async def on_tap_category(self, category: Optional[str]) -> None:
         """A category tile was tapped in the library."""
-        self._browsing()
+        self._enter(LIBRARY)
 
     async def on_tap_series(self, series: Optional[str]) -> None:
         """A series was tapped in the library."""
-        self._browsing()
+        self._enter(LIBRARY)
 
-    async def on_tap_book(self, book: Optional[str],
-                          level: Optional[str]) -> None:
-        """A book was opened: the flourish, and settle looking down at the book.
-
-        The head-down pose is a `posture`, not a `pose`: a pose lives on the
-        gesture layer, whose claim expires ~1 s after it is set, so the head
-        would drift back up on its own. A posture is held until close_book
-        clears it, and gestures (nod, wiggle, page-turn glances) play over the
-        top and settle back down to the book rather than to level.
-        """
-        self.robot.act(par(
-            seq(*self._flourish_steps()),
-            {"kind": "posture",
-             "joints": {"head_pan": 0.0, "head_tilt": HEAD_DOWN}},
-        ))
+    async def on_show_library(self) -> None:
+        """The library screen appeared — including the return from a finished
+        book, which is what clears the book-end green."""
+        self.page_errors = 0
+        self._enter(LIBRARY)
 
     async def on_tap_starred(self, book: Optional[str],
                              level: Optional[str]) -> None:
-        """A book was starred/favourited."""
-        self._browsing()
+        """A book was starred/favourited.
+
+        Leaves the ring alone: starring can happen on the book-end screen, and
+        it must not knock the book-end green back to neutral.
+        """
+
+    async def on_tap_book(self, book: Optional[str],
+                          level: Optional[str]) -> None:
+        """A book was opened: still neutral until practice or reading starts.
+
+        No head-down posture any more: MAKI looks at the child (face
+        tracking) for the whole book and only glances down at page start and
+        page end.
+        """
+        self.page_errors = 0
+        self._enter(BOOK)
 
     async def on_close_book(self, book: Optional[str],
                             level: Optional[str]) -> None:
-        """Book closed: back to blue, head level again.
+        """Book closed: back to the neutral library light."""
+        self.page_errors = 0
+        self._enter(LIBRARY)
 
-        Releases the head-down posture set by on_tap_book, then drives the head
-        up explicitly — clearing the posture alone would only blend back to
-        whatever idle happens to want.
-        """
-        self.robot.act(par(
-            self._color(BLUE),
-            seq(
-                {"kind": "posture", "clear": True},
-                {"kind": "pose",
-                 "joints": {"head_pan": 0.0, "head_tilt": HEAD_LEVEL},
-                 "duration_ms": 900},
-            ),
-        ))
+    # Practice words — continuous purple, looking at the child.
+
+    async def on_practice_start(self, book: Optional[str]) -> None:
+        """The practice-words phase began, before the first word."""
+        self._look_at_child()
+        self._enter(PRACTICE)
 
     async def on_practice_correct(self, word: Optional[str]) -> None:
-        """A practice word was read correctly."""
-        self._hold_then(GREEN, FEEDBACK_HOLD_MS, WHITE)
+        """A practice word was read correctly: no colour change."""
+        self._practice()
 
     async def on_practice_incorrect(self, word: Optional[str]) -> None:
-        """A practice word was read incorrectly."""
-        self._hold_then(ORANGE, FEEDBACK_HOLD_MS, WHITE)
+        """A practice word was read incorrectly: stays purple."""
+        self._practice()
 
     async def on_focus_word_correct(self, word: Optional[str]) -> None:
-        """The focus word was read correctly."""
-        self._hold_then(GREEN, FEEDBACK_HOLD_MS, WHITE)
+        """The focus word was read correctly: no colour change, ever."""
 
     async def on_focus_word_incorrect(self, word: Optional[str]) -> None:
-        """The focus word was read incorrectly."""
-        self._hold_then(ORANGE, FEEDBACK_HOLD_MS, WHITE)
+        """The focus word was read incorrectly.
+
+        Mid-reading it is a flagged word (purple, then back to blue); anywhere
+        else it is part of the practice words.
+        """
+        if self.phase in (READING, PAGE_END):
+            self._flag_word()
+        else:
+            self._practice()
+
+    # Reading — blue, purple per flagged word.
 
     async def on_read_to_me(self) -> None:
-        """The child chose 'read to me' (narration) mode."""
-        self.robot.led_color(*BLUE)
+        """The child chose 'read to me' (narration) mode: reading starts."""
+        if self.phase in (LIBRARY, BOOK, PRACTICE):
+            self._enter(READING)
 
     async def on_listen(self) -> None:
-        """The app started listening to the child read."""
-        self.robot.led_color(*WHITE)
+        """The app started listening to the child read.
+
+        Starts reading when nothing else has yet. During practice words the
+        app listens too, and that must not turn the purple to blue; mid-page
+        it must not cut a flagged word's purple short.
+        """
+        if self.phase in (LIBRARY, BOOK):
+            self._enter(READING)
 
     async def on_mute(self) -> None:
-        """Sound was muted."""
-        self.robot.led_color(*BLUE)
+        """Sound was muted: nothing to show."""
 
     async def on_tap_page(self, page: Optional[int]) -> None:
-        """A page was tapped/turned: the flourish, back to how it was."""
-        self._flourish_then()
+        """A page was turned: back to reading blue for the new page.
+
+        No glance here — page_start and page_end are the glance moments, and
+        a third per page would stop them reading as deliberate. The error
+        count is left to page_start: if the app sends the turn before
+        page_end, resetting here would lose the page's errors.
+        """
+        if self.phase != READING:
+            self._enter(READING)
+
+    async def on_page_start(self, page: Optional[int]) -> None:
+        """The child began reading a page: blue, and a glance at the page."""
+        self.page_errors = 0
+        if self.phase != READING:
+            self._enter(READING)
+        self._glance_down()
+
+    async def on_reading_word_incorrect(self, word: Optional[str]) -> None:
+        """A word was flagged for practice while reading: purple at once."""
+        self._flag_word()
+
+    async def on_page_end(self, page: Optional[int],
+                          errors: Optional[int]) -> None:
+        """The child finished reading the page.
+
+        With errors: purple held until the page turns, looking at the child
+        (like the practice words). All correct: stays blue, with a glance down
+        at the finished page. Trusts the app's ``errors`` count; falls back to
+        the words flagged on this page when it is missing.
+        """
+        if errors is not None:
+            try:
+                self.page_errors = max(0, int(errors))
+            except (TypeError, ValueError):
+                log.warning("page_end: errors %r is not a count; using %d",
+                            errors, self.page_errors)
+        self._enter(PAGE_END)
+        if self.page_errors:
+            self._look_at_child()
+        else:
+            self._glance_down()
+
+    # Book end — brighter green, held until the library.
+
+    async def on_book_end(self, book: Optional[str],
+                          level: Optional[str]) -> None:
+        """The last page was finished: green, held until the library shows."""
+        self._enter(BOOK_END)
 
     async def on_book_rate(self, rating: Optional[int]) -> None:
-        """The child rated the book 1-5: show that rating's colour and hold it.
+        """The child rated the book (1-5).
 
-        The colour stays until something else claims the ring — a different
-        rating, or navigating back out to the library/home screen (which the
-        browsing handlers settle to BLUE). It is a standing indicator of the
-        rating just given, not a momentary flash.
+        Rating is part of the book end, and green is the book end's colour, so
+        the rating itself shows no colour of its own — the old per-rating
+        palette was red/orange/yellow, which the scheme rules out. Re-enters
+        book end so the green is up even if book_end was missed.
         """
-        if rating is None:
-            return
-        rgb = RATING_COLORS.get(int(rating))
-        if rgb is None:
-            log.warning("book_rate: rating %r outside 1-5, ignoring", rating)
-            return
-        self.robot.led_color(*rgb)
+        if self.phase != BOOK_END:
+            self._enter(BOOK_END)

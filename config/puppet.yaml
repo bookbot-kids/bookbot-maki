@@ -103,7 +103,7 @@ led:
   pixel_count: 48
   lock_file: /tmp/maki_led_spi.lock
   animations_file: animations.yaml   # relative to this config dir
-  default_animation: steady_blue
+  default_animation: steady_white   # neutral resting light; blue is reading-only
   # Matches the vendored ROS stack's shipped value (maki_led_defaults.yaml
   # led_ring_node: default_brightness 0.03). This file previously left it
   # unset, which silently fell back to the code default of 0.05 — 67% brighter
@@ -133,8 +133,8 @@ motion:
   layers:
     idle:       {priority: 30,  blend_in_time_s: 0.5,  blend_out_time_s: 0.8, claim_timeout_s: 5.0}
     expression: {priority: 40,  blend_in_time_s: 0.2,  blend_out_time_s: 0.3, claim_timeout_s: 1.5, merge_targets: true}
-    # Sustained baseline pose from the `posture` action (e.g. head down for as
-    # long as a book is open). Re-fed every tick by the motion service, so
+    # Sustained baseline pose from the `posture` action (a client holding a
+    # joint somewhere until it says otherwise). Re-fed every tick, so
     # unlike the others its claim never expires and it holds indefinitely.
     # Above idle so it wins at rest; below gesture so gestures play over it and
     # then settle back to it instead of to neutral.
@@ -416,7 +416,7 @@ vision:
 
 idle:
   delay_s: 5.0
-  led_animation: steady_blue
+  led_animation: steady_white
   # Gap between idle blinks, sampled uniformly at random from this range.
   blink_interval_s: [8.0, 16.0]
   # Blink speed. Raising this gives slower, gentler blinks and is always

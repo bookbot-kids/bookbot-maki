@@ -70,7 +70,8 @@ detections — so tracking behaviour can be observed and tuned without hardware.
 ## Quick start — dev machine (no hardware)
 
 ```bash
-cd maki-puppet
+git clone https://github.com/bookbot-kids/bookbot-maki.git
+cd bookbot-maki
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
@@ -88,9 +89,18 @@ python -m maki_client --host localhost demo
 ## Quick start — robot
 
 > **You need the robot's address, SSH user and venv path.** They are deliberately
-> not in this repo — they live with the robot's own notes (`bookbot-maki`,
-> `README_CONNECT_MAKI.md`). Ask for them, or read them off the robot. Everything
-> below takes `<user>@<robot-ip>` as an argument, so nothing here is hardcoded.
+> not in this repo. They live in the separate `bookbot-maki-project` repo
+> (`github.com/bookbot-hive/bookbot-maki-project`, file `README_CONNECT_MAKI.md`).
+> Ask for them, or read them off the robot. Everything below takes
+> `<user>@<robot-ip>` as an argument, so nothing here is hardcoded.
+>
+> Note the naming, which trips people up:
+> - **This repo** is `bookbot-kids/bookbot-maki`. It clones to `bookbot-maki/` and
+>   deploys to `~/bookbot-maki` on the robot — the same name in all three places,
+>   deliberately, because the robot's boot script runs that exact path.
+> - `maki_puppet` is the **Python package** inside this repo, not a separate repo.
+> - `bookbot-hive/bookbot-maki-project` is a **different repo**, holding the
+>   robot's operational notes (`README_CONNECT_MAKI.md`) and the vendored ROS stack.
 
 From the repo root on your dev machine:
 
@@ -163,7 +173,7 @@ obvious:
 
 | | |
 |---|---|
-| [`maki_puppet/bridge.py`](maki_puppet/bridge.py) | The **Bookbot app events** — 15 of them (`tap_book`, `book_rate`, `tap_page`, …), one `on_<name>` handler each, plus the colour vocabulary as module constants. This is where the app's reactions live: the tap flourish, ratings holding their colour, the head-down posture while a book is open. |
+| [`maki_puppet/bridge.py`](maki_puppet/bridge.py) | The **Bookbot app events** — 21 of them (`tap_book`, `page_end`, `book_end`, …), one `on_<name>` handler each, plus the colour vocabulary as module constants. This is where the app's reactions live: the session phase and its colour (white library, purple practice, blue reading, green book end) and the page-start/page-end down-glances. |
 | [`config/choreographies.yaml`](config/choreographies.yaml) | The **semantic events** (`celebrate`, `page_turned`, …) and the gesture keyframe library. |
 
 **Bridge handlers take precedence**: an event named in `EVENT_PARAMS` shadows a
@@ -214,9 +224,10 @@ surprise people:
   and no client involvement. The client-driven `track` action is a separate,
   explicit override.
 
-Face-following **stands down while a `posture` is held** (`yield_to_posture`), so
-opening a book pins the head at the page instead of chasing faces, and closing it
-resumes following. If the head "won't stay where I put it", check whether you used
+Face-following runs through the whole book: the app bridge only interrupts it
+with short down-glances at page start and page end. It **stands down while a
+`posture` is held** (`yield_to_posture`), so a client that wants the head pinned
+somewhere can still do that. If the head "won't stay where I put it", check whether you used
 `pose` (momentary, its layer claim expires in ~1 s) rather than `posture`
 (sustained until cleared) — see [PROTOCOL.md §6](PROTOCOL.md).
 

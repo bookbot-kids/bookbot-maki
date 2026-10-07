@@ -764,17 +764,17 @@ gestures:
 
 | Event | Priority | `on_busy` | Physical behavior |
 |---|---|---|---|
-| `reading_started` | high | replace | Warm LED pulse + wake-up gesture, look at the reader, blink. |
+| `reading_started` | high | replace | `steady_blue` + wake-up gesture, look at the reader, blink. |
 | `page_turned` | normal | replace | Glance down toward the page, blink, settle to neutral. |
 | `word_read` | **low** | **drop** | Single blink. Deliberately cheap and droppable — per-word events must never build lag. |
-| `word_struggled` | normal | replace | Cool LED wave + curious head tilt (lean-in, no judgement). |
+| `word_struggled` | normal | replace | `steady_purple` + curious head tilt (lean-in, no judgement). |
 | `sentence_read` | — | — | **Ignored** (valid, acked `completed`/no-op). Reserved. |
-| `celebrate` | high | replace | Rainbow sweep + double happy wiggle, then back to `steady_blue`. |
-| `encourage` | normal | replace | Warm pulse + nod. |
-| `attention` | high | replace | Rainbow sweep + wake-up gesture. |
-| `reading_finished` | high | replace | Gold glow + double nod, settle, back to `steady_blue`. |
-| `sleep` | normal | replace | Dim blue breathing + eyes-droop gesture. |
-| `wake` | high | replace | `steady_blue` + wake-up gesture. |
+| `celebrate` | high | replace | `steady_blue` + double happy wiggle, blink. Stays on the reading blue — green is book end only. |
+| `encourage` | normal | replace | Nod (no colour change). |
+| `attention` | high | replace | Wake-up gesture (no colour change). |
+| `reading_finished` | high | replace | `book_end_green` + double nod, settle; green held. |
+| `sleep` | normal | replace | Dim neutral breathing (`breathing_white`) + eyes-droop gesture. |
+| `wake` | high | replace | `steady_white` + wake-up gesture. |
 
 Gesture library: `nod`, `head_shake`, `happy_wiggle`, `curious_tilt`, `wake_up`,
 `sleepy`.
@@ -790,25 +790,52 @@ choreography names above — a client cannot tell the two apart on the wire.
 choreography of the same name. Editing a choreography that a bridge handler
 shadows has no effect.
 
+The bridge tracks which **phase** of a session the app is in, and each phase owns
+one standing ring colour. Events that don't move the session to a new phase leave
+the ring alone, so a correct word, a mute or a repeated `listen` can never flash a
+colour or cut a purple signal short.
+
+| Phase | Entered by | Ring |
+|---|---|---|
+| library | `tap_profile`, `tap_category`, `tap_series`, `show_library`, `close_book`; also at boot | neutral white |
+| book | `tap_book` | neutral white |
+| practice | `practice_start` (or the first `practice_*`) | purple, continuous |
+| reading | `page_start`, `tap_page`, `read_to_me`; `listen` from library/book | blue |
+| page end | `page_end` | purple if the page had errors, else blue |
+| book end | `book_end`, `book_rate` | `book_end_green` (2.5x brightness), held |
+
 | Event | Params | Physical behavior |
 |---|---|---|
-| `tap_profile` / `tap_category` / `tap_series` / `tap_starred` | `profile` / `category` / `series` / `book`,`level` | Tap flourish, then settle on resting blue. Leaving a book for the library is what clears a held rating colour. |
-| `tap_book` | `book`, `level` | Tap flourish, and install a **sustained head-down `posture`** so MAKI keeps looking at the page for as long as the book is open (§6). |
-| `close_book` | `book`, `level` | Clear the posture, head back to level, ring to resting blue. |
-| `tap_page` | `page` | Tap flourish, then return the ring to whatever colour it was showing before. |
-| `book_rate` | `rating` (1-5) | Show that rating's colour and **hold it** — it is a standing indicator, not a flash. Cleared by another rating or by navigating back to the library/home. Ratings outside 1-5 are ignored. |
-| `practice_correct` / `focus_word_correct` | `word` | Green for 2 s, then back to the listening colour. |
-| `practice_incorrect` / `focus_word_incorrect` | `word` | Orange (deliberately not red) for 2 s, then back to the listening colour. |
-| `read_to_me` / `mute` | — | Resting blue. |
-| `listen` | — | White — actively listening to the child read. |
+| `tap_profile` / `tap_category` / `tap_series` | `profile` / `category` / `series` | Library: neutral white. |
+| `show_library` | — | Library: neutral white. Send whenever the library appears — this is what clears the book-end green. |
+| `tap_book` | `book`, `level` | Book opened: neutral white. MAKI keeps following the child's face (no head-down hold). |
+| `close_book` | `book`, `level` | Library: neutral white. |
+| `tap_starred` | `book`, `level` | Nothing (may happen on the book-end screen; must not clear the green). |
+| `practice_start` | `book` | Purple; cancels any down-glance. |
+| `practice_correct` / `practice_incorrect` | `word` | Purple (no change once in practice); cancels any down-glance. |
+| `focus_word_correct` | `word` | Nothing — no colour change on a correct word. |
+| `focus_word_incorrect` | `word` | While reading: as `reading_word_incorrect`. Otherwise: as a practice word. |
+| `read_to_me` | — | Reading blue (from library, book or practice). |
+| `listen` | — | Reading blue from library/book only. Ignored during practice and mid-reading. |
+| `mute` | — | Nothing. |
+| `tap_page` | `page` | Reading blue. No glance; keeps the page's error count. |
+| `page_start` | `page` | Reading blue, resets the page's error count, and a **down-glance** at the page. |
+| `reading_word_incorrect` | `word` | Purple **immediately**, back to blue after 2 s (one act, so a newer event cancels the revert); counts an error; cancels any down-glance. |
+| `page_end` | `page`, `errors` (int) | `errors` > 0: purple, held until the page turns; cancels any glance (looking at the child). `errors` = 0: blue, plus a down-glance. Missing `errors` → the bridge's own count of flagged words since `page_start`. |
+| `book_end` | `book`, `level` | Bright green (`book_end_green`), held until `show_library`/`close_book`/a library tap. |
+| `book_rate` | `rating` (1-5) | Book-end green (ratings have no colours of their own). |
 
-The "tap flourish" is red → yellow → green, 200 ms each, then back to the
-originating colour. It is three static colours rather than an animation on
-purpose: see [`docs/LED_NOISE.md`](docs/LED_NOISE.md).
+**Gaze.** MAKI looks at the child (autonomous face tracking) for the whole book.
+The only downward looks are the glances at `page_start` and at an error-free
+`page_end`: a motion-only act tagged `glance`, three chained 600 ms `look`s at
+tilt +1.0 — head and eyes both at the bottom of their safe range (head tick 2300,
+eyes tick 2200, ~13°). Practice words and mistakes cancel a running glance, so
+they are always met looking at the child.
 
-Colour vocabulary (wire RGB, scaled by the ring's own brightness caps): blue =
-resting/not reading, white = listening, green = correct, orange = incorrect,
-red/yellow = rating values. All defined as constants at the top of `bridge.py`.
+Colour vocabulary (wire RGB, scaled by the ring's own brightness caps; constants at
+the top of `bridge.py`): neutral `(150,150,150)` = library/book selection, blue
+`(0,80,200)` = reading, purple `(150,0,255)` = needs practice, `book_end_green` =
+book end only. No red, orange or yellow, and no multi-colour flourishes.
 
 ### 10.3 Parameter templating
 
@@ -892,14 +919,19 @@ Within `protocol: 1`:
 
 ## Appendix A — Animation catalog (from `config/animations.yaml`)
 
-Informative — the normative list is `welcome.animations` at runtime.
+Informative — the normative list is `welcome.animations` at runtime. An entry may
+set `brightness_scale` (default 1.0): a multiplier on `led.default_brightness` for
+that animation only, still clamped to `led.max_brightness`.
 
 | Name | Type | Color (R,G,B) | Period (s) | Intended use |
 |---|---|---|---|---|
 | `off` | static | 0,0,0 | — | Ring dark. Requests for `off` are redirected to the ambient default so the ring never goes fully dark. |
-| `steady_blue` | static | 0,80,200 | — | **The default.** `led.default_animation` and the idle animation — a steady, non-pulsing resting light. |
+| `steady_white` | static | 150,150,150 | — | **The default.** `led.default_animation` and the idle animation — the neutral resting light (library, book selection). |
+| `steady_blue` | static | 0,80,200 | — | Reading. |
+| `steady_purple` | static | 150,0,255 | — | A word needs practice. |
+| `book_end_green` | static | 0,255,0 | — | Book end only. `brightness_scale: 2.5` — the one animation brighter than the rest. |
 | `breathing_cyan` | breathing | 0,90,180 | 4.0 | Code-level fallback if `default_animation` is unset in config |
-| `breathing_white` | breathing | 150,150,150 | 5.0 | |
+| `breathing_white` | breathing | 150,150,150 | 5.0 | Used by `sleep` event |
 | `thinking_pulse_blue` | breathing | 0,100,255 | 3.0 | "Thinking" |
 | `rainbow_swirl` | rainbow | — | 5.0 | Playful |
 | `chase_rainbow` | chase_rainbow | — | 2.5 | Spatial rainbow chase; `period` is exactly one revolution. Nothing uses it by default — see [`docs/LED_NOISE.md`](docs/LED_NOISE.md). |
@@ -908,14 +940,14 @@ Informative — the normative list is `welcome.animations` at runtime.
 | `sleeping_dim_blue` | breathing | 0,0,60 | 8.0 | Sleep |
 | `breathing_slow_purple` | breathing | 60,0,80 | 8.0 | Wind-down |
 | `sleep_deep_breathe` | breathing | 30,0,45 | 12.0 | Deep sleep |
-| `breathing_blue` | breathing | 0,80,220 | 3.0 | Used by `sleep` event |
+| `breathing_blue` | breathing | 0,80,220 | 3.0 | |
 | `sparkle_soft` | breathing | 160,70,200 | 2.4 | |
-| `glow_gold` | breathing | 200,160,40 | 4.8 | Used by `reading_finished` |
+| `glow_gold` | breathing | 200,160,40 | 4.8 | |
 | `amber_idle` | breathing | 120,100,60 | 5.6 | |
 | `surprise_flash` | breathing | 200,160,30 | 2.5 | Startle (non-strobing) |
 | `warm_pulse` | breathing | 220,130,40 | 3.5 | Encourage / warm |
 | `cool_wave` | breathing | 40,160,200 | 3.2 | Calm / empathy |
-| `attention_sweep` | rainbow | — | 1.8 | Celebrate / attention |
+| `attention_sweep` | rainbow | — | 1.8 | Playful (no event uses it) |
 | `speaking_pulse` | breathing | 150,60,60 | 3.0 | Reserved for TTS |
 | `concurrent_listen` | breathing | 0,140,120 | 4.0 | |
 | `red_alert` | breathing | 220,0,0 | 1.5 | Safety |

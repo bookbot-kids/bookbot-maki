@@ -1,4 +1,10 @@
 # Defines the properties for named LED animations for MAKI.
+#
+# Fields: type, color [r, g, b], period (s), and optional brightness_scale —
+# a multiplier on led.default_brightness for this animation only (default
+# 1.0). It is applied after the usual 0.9 cap and still clamped to
+# led.max_brightness, so it can lift one signal above the rest but never past
+# the ring's hard limit.
 
 animations:
   # --- Standard Animations ---
@@ -7,12 +13,38 @@ animations:
     color: [0, 0, 0]
     period: 1.0
 
-  # Default resting light: steady, non-pulsing blue. `static` holds one colour
-  # with no cycle, so there is no visible flashing/breathing at rest.
+  # Reading light: steady, non-pulsing blue. Blue is reserved for reading
+  # (bridge.py BLUE); the resting/library default is steady_white.
   steady_blue:
     type: "static"
     color: [0, 80, 200]
     period: 1.0
+
+  # Default resting light: neutral white for the library, book selection and
+  # idle (led.default_animation). `static` holds one colour with no cycle, so
+  # there is no visible flashing/breathing at rest. Grey rather than full
+  # white so it sits at roughly the same perceived level as the reading blue.
+  # Must match bridge.py NEUTRAL.
+  steady_white:
+    type: "static"
+    color: [150, 150, 150]
+    period: 1.0
+
+  # A word needs practice / the practice-words phase. Must match bridge.py
+  # PURPLE.
+  steady_purple:
+    type: "static"
+    color: [150, 0, 255]
+    period: 1.0
+
+  # Book end: green, held until the app returns to the library. Brighter than
+  # every other colour on purpose — it is the one celebratory signal.
+  # 2.5 x base brightness (0.03) = 0.075, under the 0.10 max_brightness cap.
+  book_end_green:
+    type: "static"
+    color: [0, 255, 0]
+    period: 1.0
+    brightness_scale: 2.5
 
   breathing_cyan:
     type: "breathing"
@@ -41,11 +73,10 @@ animations:
     type: "chase_rainbow"
     color: [0, 0, 0]  # color is ignored for chase_rainbow
     # One full revolution takes exactly `period`. Nothing calls this animation
-    # any more — the app's tap flourish is three static colours (bridge.py
-    # FLOURISH_COLORS) and boot uses `boot_pulse`, both because rewriting all
-    # 48 pixels 50x a second is what made servo-bus noise visible as white
-    # flashes (docs/LED_NOISE.md). Kept because it is a valid animation clients
-    # may still request by name.
+    # any more — boot uses `boot_pulse`, because rewriting all 48 pixels 50x a
+    # second is what made servo-bus noise visible as white flashes
+    # (docs/LED_NOISE.md). Kept because it is a valid animation clients may
+    # still request by name.
     #
     # 2.5 s exactly matches the vendored ROS stack (maki_led/config/
     # animations.yaml), which is the configuration that demonstrably read as a

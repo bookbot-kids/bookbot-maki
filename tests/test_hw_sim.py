@@ -352,10 +352,14 @@ def test_crossfade_never_desaturates_through_white():
     flash. Interpolating hue keeps every intermediate coloured."""
     import itertools
 
-    from maki_puppet.bridge import GREEN, RATING_COLORS
+    from maki_puppet.bridge import BLUE, PURPLE
     from maki_puppet.hw.led_ring import blend_hue
 
-    for a, b in itertools.permutations(list(RATING_COLORS.values()) + [GREEN], 2):
+    # Every saturated colour the app puts on the ring (NEUTRAL is grey by
+    # design, so it has no hue to keep), plus a primary-red/green pair as the
+    # worst case for a straight RGB lerp.
+    palette = [BLUE, PURPLE, (0, 255, 0), (255, 0, 0)]
+    for a, b in itertools.permutations(palette, 2):
         for k in range(1, 25):
             r, g, bl = blend_hue(a, b, k / 25)
             # Grey/white means all three channels are close together.
@@ -378,14 +382,16 @@ def test_blend_hue_handles_greyscale_endpoints():
 
 
 def test_no_crossfade_means_no_intermediate_colour():
-    """The rating-flash regression: with animation_transition_s = 0 a colour
+    """The colour-flash regression: with animation_transition_s = 0 a colour
     change must land on the new colour directly, never on an interpolated
     intermediate (which is always brighter or greyer than both endpoints)."""
     import threading
     import time as _time
 
-    from maki_puppet.bridge import GREEN, RATING_COLORS
+    from maki_puppet.bridge import BLUE, NEUTRAL, PURPLE
     from maki_puppet.hw.led_ring import LedRing
+
+    sequence = [NEUTRAL, PURPLE, BLUE, PURPLE, BLUE, NEUTRAL]
 
     class Recording(_FakePixels):
         def __init__(self):
@@ -402,10 +408,10 @@ def test_no_crossfade_means_no_intermediate_colour():
     t = threading.Thread(target=ring._anim_loop, daemon=True)
     t.start()
     try:
-        ring.set_color(*GREEN)
+        ring.set_color(*sequence[0])
         _time.sleep(0.15)
         ring.pixels.frames.clear()
-        for rgb in RATING_COLORS.values():
+        for rgb in sequence[1:]:
             ring.set_color(*rgb)
             _time.sleep(0.15)
         seen = {tuple(f) for f in ring.pixels.frames}
@@ -413,5 +419,45 @@ def test_no_crossfade_means_no_intermediate_colour():
         ring._is_shutting_down = True
         t.join(timeout=1.0)
 
-    allowed = {tuple(c) for c in RATING_COLORS.values()} | {tuple(GREEN)}
+    allowed = {tuple(c) for c in sequence}
     assert seen <= allowed, f"interpolated colours leaked through: {seen - allowed}"
+
+
+# ── Per-animation brightness_scale ─────────────────────────────────────────
+
+
+def _frame_brightness(ring, animation):
+    """Render exactly one frame of *animation* and return its brightness."""
+
+    class _StopAfterOneFrame(_FakePixels):
+        def show(self):
+            super().show()
+            ring._is_shutting_down = True
+
+    ring.pixels = _StopAfterOneFrame()
+    ring.set_animation(animation)
+    ring._anim_loop()
+    return ring.pixels.brightness
+
+
+def test_brightness_scale_lifts_one_animation_above_the_rest():
+    """book_end_green must render brighter than every ordinary static colour:
+    it is the one celebratory signal (animations.yaml brightness_scale)."""
+    cfg = {"default_brightness": 0.03, "max_brightness": 0.10}
+    plain = _frame_brightness(LedRing(cfg, load_animations()), "steady_blue")
+    boosted = _frame_brightness(LedRing(cfg, load_animations()), "book_end_green")
+    assert plain == pytest.approx(0.03 * 0.9)
+    assert boosted == pytest.approx(0.03 * 0.9 * 2.5)
+
+
+def test_brightness_scale_never_exceeds_max_brightness():
+    cfg = {"default_brightness": 0.03, "max_brightness": 0.05}
+    assert _frame_brightness(LedRing(cfg, load_animations()),
+                             "book_end_green") == pytest.approx(0.05)
+
+
+def test_same_colour_different_brightness_scale_is_a_new_animation():
+    """Otherwise switching to a brighter variant of the active colour would
+    be deduplicated away and never shown."""
+    assert not LedRing._anim_matches(Anim("static", (0, 255, 0), 1.0),
+                                     Anim("static", (0, 255, 0), 1.0, 2.5))

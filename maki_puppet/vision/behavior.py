@@ -21,11 +21,12 @@ somewhere else, then goes back to you when that act finishes.  On top of that
 the behavior stands down entirely while any client performance is live, so a
 client's `track` action never fights this one for the same layer.
 
-It also stands down while a **posture** is held.  That is the "reading" case:
-opening a book installs a head-down posture (see ``AppEventBridge.on_tap_book``)
-which persists until the book closes, and a reflex that kept pulling the head
-up to the reader's face would defeat the entire point of it.  Closing the book
-clears the posture and face-following resumes on its own.
+It also stands down while a **posture** is held.  A posture is a client saying
+"keep this joint here until I say otherwise", and a reflex that kept pulling the
+head back to a face would defeat it.  The app bridge no longer installs one
+while a book is open: MAKI follows the child through the whole book, and the
+bridge's page-start/page-end down-glances (gesture layer, above tracking)
+interrupt it briefly.
 """
 
 from __future__ import annotations
@@ -69,7 +70,7 @@ class FaceTrackingBehavior:
         # and someone turning their head away briefly.
         self._release_after_s = float(cfg.get("release_after_s", 2.0))
         self._eyes_only = bool(cfg.get("eyes_only", False))
-        # Yield to a held posture (e.g. head down while a book is open).
+        # Yield to a held posture (a client pinning the head somewhere).
         # Turning this off makes MAKI keep following faces over the top of the
         # book pose, which is almost never what you want.
         self._yield_to_posture = bool(cfg.get("yield_to_posture", True))
@@ -129,10 +130,9 @@ class FaceTrackingBehavior:
                 self._disarm()
             return
 
-        # Stand down while a posture is held. A posture is the app stating
-        # where a joint lives until it says otherwise — "head down at the book
-        # until it closes" — and following a face would drag the head straight
-        # back off the page. Layer priority can't express this on its own:
+        # Stand down while a posture is held. A posture is a client stating
+        # where a joint lives until it says otherwise, and following a face
+        # would drag the head straight back off it. Layer priority can't express this on its own:
         # `tracking` (50) deliberately outranks `posture` (45) so an explicitly
         # requested `track` act still wins, so the reflex has to yield here.
         if self._suppressed_by_posture():

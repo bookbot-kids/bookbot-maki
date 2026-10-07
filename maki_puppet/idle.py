@@ -1,6 +1,7 @@
 """IdleBehavior — MAKI's autonomous heartbeat while no client is playing.
 
-Arms after ``idle.delay_s`` of engine inactivity: breathing LED animation,
+Arms after ``idle.delay_s`` of engine inactivity: the resting LED animation
+(skipped while the app bridge holds a session colour — see ``led_hold``),
 a 2 Hz keepalive republish of the held pose on the `idle` motion layer (so
 the LayerBlender claim stays alive and the planner's micro-breathing keeps
 running), and randomized blinks submitted THROUGH the engine at priority 5
@@ -14,7 +15,7 @@ import asyncio
 import logging
 import random
 import time
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .engine import ActionEngine, Performance
 from .motion import joints as joints_mod
@@ -37,8 +38,14 @@ class IdleBehavior:
         config: Mapping[str, Any],
         *,
         rng: Optional[random.Random] = None,
+        led_hold: Optional[Callable[[], bool]] = None,
     ) -> None:
         cfg = dict(config or {})
+        # True while someone else owns the ring's colour (the app bridge
+        # holding a session colour: practice purple, reading blue, book-end
+        # green). Idle then leaves the LED alone, so re-arming after a client
+        # act can never reset a held colour to the resting light mid-book.
+        self._led_hold = led_hold
         self._engine = engine
         self._motion = motion
         self._led = led
@@ -117,11 +124,23 @@ class IdleBehavior:
         )
         self._last_keepalive = 0.0
         self._next_blink = now + self._rng.uniform(self._blink_lo, self._blink_hi)
-        try:
-            self._led.set_animation(self._led_animation)
-        except Exception:
-            log.exception("idle LED animation %r failed", self._led_animation)
+        if self._led_held():
+            log.debug("idle LED skipped: ring colour is held")
+        else:
+            try:
+                self._led.set_animation(self._led_animation)
+            except Exception:
+                log.exception("idle LED animation %r failed", self._led_animation)
         log.debug("idle behavior armed")
+
+    def _led_held(self) -> bool:
+        if self._led_hold is None:
+            return False
+        try:
+            return bool(self._led_hold())
+        except Exception:  # pragma: no cover - defensive
+            log.exception("idle led_hold check failed")
+            return False
 
     def _disarm(self) -> None:
         self._armed = False
